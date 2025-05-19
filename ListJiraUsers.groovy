@@ -12,14 +12,13 @@ def loginManager = ComponentAccessor.getComponentOfType(LoginManager.class)
 def allUsers = userUtil.getUsers()
 
 // --- Date Formatter ---
-// Define it once outside the loop. Use HH for 24-hour format if preferred.
+// Use HH for 24-hour format if preferred.
 def dateFormat = new SimpleDateFormat("dd/MM/yy HH:mm")
 
 // --- HTML Builder ---
 StringBuilder htmlBuilder = new StringBuilder()
 
 // --- Table Header ---
-// Use <thead> and <th> for semantic HTML and better styling potential
 htmlBuilder.append("<table border='1' style='border-collapse: collapse;'>") 
 htmlBuilder.append("<thead>")
 htmlBuilder.append("<tr>")
@@ -53,7 +52,7 @@ allUsers.each { ApplicationUser user ->
     } else {
         // Get Login Info (handle null loginInfo)
         def loginInfo = loginManager.getLoginInfo(username)
-        Long lastLoginTime = loginInfo?.getLastLoginTime() // Safe navigation operator ?.
+        Long lastLoginTime = loginInfo?.getLastLoginTime() 
 
         if (lastLoginTime == null) {
             lastLoginText = "Never logged in"
