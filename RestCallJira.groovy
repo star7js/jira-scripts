@@ -16,6 +16,7 @@ import groovyx.net.http.URIBuilder
 
 import java.net.HttpURLConnection // For HTTP status codes
 
+// Use this script to make REST calls from inside ScriptRunner
 // --- Configuration ---
 // !!! IMPORTANT: Replace "PROJECT-123" with the actual issue key you want to fetch !!!
 final String ISSUE_KEY_TO_FETCH = "PROJECT-123"
