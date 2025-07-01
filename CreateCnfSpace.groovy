@@ -6,14 +6,25 @@ import com.atlassian.httpclient.api.entity.ContentTypes
 import groovy.json.JsonBuilder
 
 // ── 1. Grab the issue & custom-fields ───────────────────────────────────
-def issue       = issue
-def cfSummary   = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("Summary of the Space")
-def cfPurpose   = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("Describe the purpose")
-def cfSpaceName = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("New Desired Space Name")
-def cfSpaceKey  = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("Desired Space Key")
+def issue              = issue
+def customFieldManager = ComponentAccessor.customFieldManager
 
-def summary   = (issue.getCustomFieldValue(cfSummary) ?: issue.summary) as String
-def purpose   = issue.getCustomFieldValue(cfPurpose) as String ?: ""
+def cfSummary   = customFieldManager.getCustomFieldObjectByName("Summary of the Space")
+def cfPurpose   = customFieldManager.getCustomFieldObjectByName("Describe the purpose")
+def cfSpaceName = customFieldManager.getCustomFieldObjectByName("New Desired Space Name")
+def cfSpaceKey  = customFieldManager.getCustomFieldObjectByName("Desired Space Key")
+
+if (!cfSpaceName) {
+    log.error "Custom field 'New Desired Space Name' not found."
+    return false
+}
+if (!cfSpaceKey) {
+    log.error "Custom field 'Desired Space Key' not found."
+    return false
+}
+
+def summary   = ((cfSummary ? issue.getCustomFieldValue(cfSummary) : null) ?: issue.summary) as String
+def purpose   = (cfPurpose ? issue.getCustomFieldValue(cfPurpose) : "") as String
 def spaceName = issue.getCustomFieldValue(cfSpaceName) as String
 def spaceKey  = issue.getCustomFieldValue(cfSpaceKey)  as String
 
