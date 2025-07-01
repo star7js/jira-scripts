@@ -1,92 +1,74 @@
 import com.atlassian.jira.component.ComponentAccessor
-import com.atlassian.sal.api.net.Request
-import com.atlassian.sal.api.net.Response
-import com.atlassian.sal.api.net.ResponseException
-import com.atlassian.sal.api.net.ReturningResponseHandler
-import groovy.json.JsonBuilder
-import org.apache.log4j.Logger
 import com.atlassian.applinks.api.ApplicationLinkService
-import com.atlassian.applinks.api.ApplicationLink
-import com.atlassian.applinks.api.ApplicationType
-import com.atlassian.applinks.api.application.confluence.ConfluenceApplicationType
+import com.atlassian.applinks.api.application.confluence.Confluence
+import com.atlassian.httpclient.api.Request
+import com.atlassian.httpclient.api.entity.ContentTypes
+import groovy.json.JsonBuilder
 
-def log = Logger.getLogger("com.atlassian.scriptrunner.CreateConfluenceSpaceTest")
+// ── 1. Grab the issue & custom-fields ───────────────────────────────────
+def issue       = issue
+def cfSummary   = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("Summary of the Space")
+def cfPurpose   = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("Describe the purpose")
+def cfSpaceName = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("New Desired Space Name")
+def cfSpaceKey  = ComponentAccessor.customFieldManager.getCustomFieldObjectByName("Desired Space Key")
 
-// Test values - modify these as needed
-def testValues = [
-    spaceName: "Test Space Name",
-    spaceKey: "TEST" + System.currentTimeMillis().toString().take(4), // Ensures unique key
-    isOpsec: true
-]
+def summary   = (issue.getCustomFieldValue(cfSummary) ?: issue.summary) as String
+def purpose   = issue.getCustomFieldValue(cfPurpose) as String ?: ""
+def spaceName = issue.getCustomFieldValue(cfSpaceName) as String
+def spaceKey  = issue.getCustomFieldValue(cfSpaceKey)  as String
 
-log.info("Starting test with values: ${testValues}")
-
-// Prepare the space creation payload
-def jsonBuilder = new JsonBuilder()
-jsonBuilder {
-    key testValues.spaceKey
-    name testValues.spaceName
-    type "global"
-    description {
-        plain {
-            value "Space created from ScriptRunner console test"
-            representation "plain"
-        }
-    }
-    permissions {
-        if (testValues.isOpsec) {
-            "space-permissions" ([
-                "user-permissions": [
-                    [
-                        "type": "user",
-                        "username": "admin",
-                        "permissions": ["ADMIN"]
-                    ]
-                ]
-            ])
-        }
-    }
+if (!spaceName || !spaceKey) {
+    log.error "Confluence-Space: missing name/key; name='${spaceName}', key='${spaceKey}'"
+    return false
 }
 
-// Get the Confluence application link
-def applicationLinkService = ComponentAccessor.getOSGiComponentInstanceOfType(ApplicationLinkService.class)
+// ── 2. Build your JSON payload ──────────────────────────────────────────
+def payload = new JsonBuilder([
+    key:   spaceKey,
+    name:  spaceName,
+    description: [
+      plain: [
+        value:          "${summary}\n\n${purpose}",
+        representation: "plain"
+      ]
+    ]
+]).toString()
 
-// Directly use ConfluenceApplicationType.class, not an instance fetched from OSGi
-def confluenceLink = applicationLinkService.getPrimaryApplicationLink(ConfluenceApplicationType.class)
-
+// ── 3. Look up your Confluence Application Link ─────────────────────────
+def appLinkSvc     = ComponentAccessor.getOSGiComponentInstanceOfType(ApplicationLinkService)
+def confluenceLink = appLinkSvc.getPrimaryApplicationLink(Confluence)
 if (!confluenceLink) {
-    log.error("No Confluence application link found using ConfluenceApplicationType.class")
-    return "ERROR: No Confluence application link found using ConfluenceApplicationType.class"
+    log.error "No Confluence application link found!"
+    return false
 }
+def factory = confluenceLink.createAuthenticatedRequestFactory()
 
-// Create the HTTP request
-def httpClient = confluenceLink.createAuthenticatedRequestFactory().createRequest(Request.MethodType.POST, "/rest/api/space")
-httpClient.setHeader("Content-Type", "application/json")
-httpClient.setRequestBody(jsonBuilder.toString())
+// ── 4. Create & execute your request ──────────────────────────────────
+def req = factory
+  .createRequest(Request.MethodType.POST, "/rest/api/space")
+req
+  .setHeader("Content-Type", "application/json")
+  .setEntity(payload, ContentTypes.APPLICATION_JSON)
 
-// Execute the request
-try {
-    def response = httpClient.execute(new ReturningResponseHandler<Response, Response>() {
-        @Override
-        Response handle(Response localResponse) throws ResponseException {
-            if (localResponse.statusCode != 200) {
-                log.error("Failed to create Confluence space. Status: ${localResponse.statusCode}, Response: ${localResponse.responseBodyAsString}")
-                throw new ResponseException("Failed to create Confluence space")
-            }
-            return localResponse
-        }
-    } as com.atlassian.sal.api.net.ResponseHandler)
-    
-    def result = "Successfully created Confluence space:\n" +
-                 "Space Name: ${testValues.spaceName}\n" +
-                 "Space Key: ${testValues.spaceKey}\n" +
-                 "OPSEC Space: ${testValues.isOpsec}"
-    
-    log.info(result)
-    return result
-    
-} catch (Exception e) {
-    def errorMessage = "Error creating Confluence space: ${e.message}"
-    log.error(errorMessage, e)
-    return "ERROR: " + errorMessage
-} 
+def resp = req.execute()
+
+// ── 5. Handle success, conflicts, and errors ───────────────────────────
+def code = resp.statusCode
+if (code in 200..299) {
+    log.info "Confluence space '${spaceKey}' created (HTTP ${code})."
+    // Bonus: add a comment to the Jira issue with the new space URL
+    def comment = ComponentAccessor.commentManager
+      .create(issue, ComponentAccessor.jiraAuthenticationContext.loggedInUser,
+              "✅ New Confluence space created: ${confluenceLink.displayUrl}/display/${spaceKey}",
+              true)
+    return true
+}
+else if (code == 409) {
+    log.warn "Space key '${spaceKey}' already exists (HTTP 409); skipping creation."
+    return true
+}
+else {
+    def err = resp.responseBodyAsString
+    log.error "Failed to create Confluence space: HTTP ${code} — ${err}"
+    return false
+}
