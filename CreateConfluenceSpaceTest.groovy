@@ -16,7 +16,7 @@ def log = Logger.getLogger("com.atlassian.scriptrunner.CreateConfluenceSpaceTest
 def testValues = [
     spaceName: "Test Space Name",
     spaceKey: "TEST" + System.currentTimeMillis().toString().take(4), // Ensures unique key
-    isOpsec: true
+    isSecure: true
 ]
 
 log.info("Starting test with values: ${testValues}")
@@ -34,7 +34,7 @@ jsonBuilder {
         }
     }
     permissions {
-        if (testValues.isOpsec) {
+        if (testValues.isSecure) {
             "space-permissions" ([
                 "user-permissions": [
                     [
@@ -80,7 +80,7 @@ try {
     def result = "Successfully created Confluence space:\n" +
                  "Space Name: ${testValues.spaceName}\n" +
                  "Space Key: ${testValues.spaceKey}\n" +
-                 "OPSEC Space: ${testValues.isOpsec}"
+                 "Secure Space: ${testValues.isSecure}"
     
     log.info(result)
     return result

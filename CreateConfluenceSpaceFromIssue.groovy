@@ -7,10 +7,17 @@
 // =============================================================================
 
 import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.sal.api.net.Request
+import com.atlassian.sal.api.net.Response
+import com.atlassian.sal.api.net.ResponseException
+import com.atlassian.sal.api.net.ReturningResponseHandler
 import groovy.json.JsonBuilder
-import groovy.json.JsonSlurper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import com.atlassian.applinks.api.ApplicationLinkService
+import com.atlassian.applinks.api.ApplicationLink
+import com.atlassian.applinks.api.ApplicationType
+import com.atlassian.applinks.api.application.confluence.ConfluenceApplicationType
 
 // =============================================================================
 // CONFIGURATION SECTION
@@ -24,11 +31,11 @@ def CUSTOM_FIELD_SPACE_NAME = "New Desired Space Name"      // ← Change this
 def CUSTOM_FIELD_SPACE_KEY = "Desired Space Key"            // ← Change this
 
 // Confluence Configuration
-def CONFLUENCE_BASE_URL = "https://confluence.mycompany.com/wiki"  // ← Change this
 def CONFLUENCE_API_PATH = "/rest/api/space"
 
-// Credentials Configuration
-def CREDENTIALS_KEY = "confluence.apiToken"                 // ← Change this
+// Advanced Configuration
+def ENABLE_SECURE_SPACE = false                              // ← Set to true for secure spaces
+def SECURE_ADMIN_USER = "admin"                              // ← Admin user for secure spaces
 
 // Advanced Configuration
 def ENABLE_DRY_RUN = false                                  // ← Set to true for testing
@@ -127,26 +134,25 @@ def executeWithRetry(Closure operation, int maxRetries = 3) {
     }
 }
 
-def getCredentials() {
+def getConfluenceApplicationLink() {
     try {
-        def secure = ComponentAccessor.getOSGiComponentInstanceOfType(
-            com.onresolve.scriptrunner.canned.common.admin.SecureFieldsService
-        )
+        def applicationLinkService = ComponentAccessor.getOSGiComponentInstanceOfType(ApplicationLinkService.class)
         
-        if (!secure) {
-            throw new Exception("SecureFieldsService not available")
+        if (!applicationLinkService) {
+            throw new Exception("ApplicationLinkService not available")
         }
         
-        def creds = secure.get(CREDENTIALS_KEY)
-        if (!creds || !creds.username || !creds.password) {
-            throw new Exception("Credentials not found or invalid")
+        def confluenceLink = applicationLinkService.getPrimaryApplicationLink(ConfluenceApplicationType.class)
+        
+        if (!confluenceLink) {
+            throw new Exception("No Confluence application link found. Please configure Application Links in Jira.")
         }
         
-        log.info("Retrieved credentials successfully")
-        return creds
+        log.info("Retrieved Confluence application link successfully")
+        return confluenceLink
         
     } catch (Exception e) {
-        log.error("Failed to retrieve credentials: ${e.message}", e)
+        log.error("Failed to retrieve Confluence application link: ${e.message}", e)
         throw e
     }
 }
@@ -157,54 +163,70 @@ def createSpacePayload(spaceKey, spaceName, summary, purpose) {
         description += "\n\n${purpose}"
     }
     
-    def payload = new JsonBuilder([
-        key: spaceKey,
-        name: spaceName,
-        type: "global",
-        description: [
-            plain: [
-                value: description,
-                representation: "plain"
-            ]
-        ]
-    ]).toString()
+    def jsonBuilder = new JsonBuilder()
+    jsonBuilder {
+        key spaceKey
+        name spaceName
+        type "global"
+        description {
+            plain {
+                value description
+                representation "plain"
+            }
+        }
+        if (ENABLE_SECURE_SPACE) {
+            permissions {
+                "space-permissions" ([
+                    "user-permissions": [
+                        [
+                            "type": "user",
+                            "username": SECURE_ADMIN_USER,
+                            "permissions": ["ADMIN"]
+                        ]
+                    ]
+                ])
+            }
+        }
+    }
     
+    def payload = jsonBuilder.toString()
     log.debug("Created payload: ${payload}")
     return payload
 }
 
-def makeConfluenceRequest(apiUrl, payload, username, apiToken) {
-    def conn = new URL(apiUrl).openConnection()
-    conn.setRequestMethod("POST")
-    conn.doOutput = true
-    conn.setRequestProperty("Content-Type", "application/json")
-    conn.setConnectTimeout(TIMEOUT_MS)
-    conn.setReadTimeout(TIMEOUT_MS)
+def makeConfluenceRequest(confluenceLink, payload) {
+    def httpClient = confluenceLink.createAuthenticatedRequestFactory().createRequest(Request.MethodType.POST, CONFLUENCE_API_PATH)
+    httpClient.setHeader("Content-Type", "application/json")
+    httpClient.setRequestBody(payload)
     
-    // Basic authentication
-    def auth = "${username}:${apiToken}".bytes.encodeBase64().toString()
-    conn.setRequestProperty("Authorization", "Basic ${auth}")
-    
-    // Send payload
-    conn.outputStream.withWriter("UTF-8") { it << payload }
-    
-    return conn
+    return httpClient
 }
 
-def handleResponse(conn, spaceKey) {
-    def code = conn.responseCode
-    log.info("Confluence API response code: ${code}")
-    
-    if (code >= 200 && code < 300) {
-        log.info("Confluence space '${spaceKey}' created successfully")
+def handleResponse(httpClient, spaceKey) {
+    try {
+        def response = httpClient.execute(new ReturningResponseHandler<Response, Response>() {
+            @Override
+            Response handle(Response localResponse) throws ResponseException {
+                if (localResponse.statusCode == 200) {
+                    log.info("Confluence space '${spaceKey}' created successfully")
+                    return localResponse
+                } else if (localResponse.statusCode == 409) {
+                    log.warn("Space key '${spaceKey}' already exists. Skipping creation.")
+                    return localResponse
+                } else {
+                    log.error("Failed to create Confluence space. Status: ${localResponse.statusCode}, Response: ${localResponse.responseBodyAsString}")
+                    throw new ResponseException("Failed to create Confluence space")
+                }
+            }
+        } as com.atlassian.sal.api.net.ResponseHandler)
+        
         return true
-    } else if (code == 409) {
-        log.warn("Space key '${spaceKey}' already exists. Skipping creation.")
-        return true
-    } else {
-        def errorStream = conn.errorStream
-        def errorBody = errorStream ? errorStream.getText("UTF-8") : "No error details available"
-        log.error("Failed to create Confluence space: HTTP ${code} — ${errorBody}")
+        
+    } catch (ResponseException e) {
+        log.error("ResponseException during Confluence API call: ${e.message}")
+        return false
+    } catch (Exception e) {
+        log.error("Unexpected error during Confluence API call: ${e.message}", e)
         return false
     }
 }
@@ -256,22 +278,16 @@ def main() {
             return true
         }
         
-        // Get credentials
-        def creds = getCredentials()
-        def username = creds.username
-        def apiToken = creds.password
-        
-        // Build API URL
-        def apiUrl = "${CONFLUENCE_BASE_URL}${CONFLUENCE_API_PATH}"
-        log.info("Making request to: ${apiUrl}")
+        // Get Confluence application link
+        def confluenceLink = getConfluenceApplicationLink()
         
         // Create payload
         def payload = createSpacePayload(spaceKey, spaceName, summary, purpose)
         
         // Execute request with retry logic
         def success = executeWithRetry({
-            def conn = makeConfluenceRequest(apiUrl, payload, username, apiToken)
-            return handleResponse(conn, spaceKey)
+            def httpClient = makeConfluenceRequest(confluenceLink, payload)
+            return handleResponse(httpClient, spaceKey)
         }, MAX_RETRIES)
         
         def duration = System.currentTimeMillis() - startTime
@@ -310,16 +326,15 @@ try {
  * 
  * PREREQUISITES:
  * - ScriptRunner for Jira app installed
- * - Confluence instance accessible via REST API
+ * - Confluence instance linked via Application Links
  * - Custom fields configured on the issue type
- * - Credentials stored in ScriptRunner Secure Fields Service
  * - Workflow post-function configured to run this script
  * 
  * CONFIGURATION:
  * - Update custom field names to match your Jira instance
- * - Set Confluence base URL to your instance
- * - Configure credentials key in Secure Fields Service
+ * - Configure Application Links between Jira and Confluence
  * - Set ENABLE_DRY_RUN to true for testing
+ * - Set ENABLE_SECURE_SPACE to true for restricted spaces
  * 
  * CUSTOM FIELDS REQUIRED:
  * - "New Desired Space Name" (Text field)
@@ -333,15 +348,16 @@ try {
  * 3. Select this script file
  * 4. Configure the transition to run when space creation is needed
  * 
- * CREDENTIALS SETUP:
- * 1. Go to ScriptRunner → Secure Fields
- * 2. Create a new secure field with key "confluence.apiToken"
- * 3. Add username and password for Confluence API access
+ * APPLICATION LINKS SETUP:
+ * 1. Go to Administration → Application Links
+ * 2. Create a new application link to Confluence
+ * 3. Configure the link with appropriate permissions
+ * 4. Test the connection to ensure it works
  * 
  * USAGE:
  * 1. Update configuration section at the top
  * 2. Ensure custom fields exist and are configured
- * 3. Set up credentials in Secure Fields Service
+ * 3. Set up Application Links between Jira and Confluence
  * 4. Configure workflow post-function
  * 5. Test with ENABLE_DRY_RUN = true
  * 6. Deploy to production
@@ -358,7 +374,8 @@ try {
  * - Logs detailed error information
  * 
  * SECURITY:
- * - Uses Secure Fields Service for credential storage
+ * - Uses Application Links for secure authentication
+ * - No credentials stored in scripts or configuration
  * - Validates all inputs to prevent injection attacks
  * - Uses HTTPS for API communication
  * 
@@ -366,6 +383,6 @@ try {
  * - Test thoroughly in development environment
  * - Use dry-run mode for initial testing
  * - Monitor logs for any issues
- * - Keep credentials secure and rotate regularly
+ * - Ensure Application Links are properly configured
  * - Validate custom field names before deployment
  */ 

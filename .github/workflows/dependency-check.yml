@@ -1,0 +1,85 @@
+name: Dependency Check
+
+on:
+  schedule:
+    # Run weekly on Sundays
+    - cron: '0 0 * * 0'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  dependency-check:
+    name: Check Dependencies
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for outdated references
+      run: |
+        echo "Checking for outdated references and dependencies..."
+        
+        # Check for outdated URLs or references
+        outdated_patterns=(
+          "scriptrunner.adaptavist.com"
+          "developer.atlassian.com"
+        )
+        
+        for pattern in "${outdated_patterns[@]}"; do
+          if grep -r "$pattern" .; then
+            echo "Found reference to: $pattern"
+          fi
+        done
+        
+    - name: Check for deprecated imports
+      run: |
+        echo "Checking for deprecated imports..."
+        
+        deprecated_imports=(
+          "org.apache.log4j"
+          "com.atlassian.jira.util"
+        )
+        
+        for import in "${deprecated_imports[@]}"; do
+          if grep -r "import $import" *.groovy; then
+            echo "Warning: Found potentially deprecated import: $import"
+          fi
+        done
+        
+    - name: Check for security best practices
+      run: |
+        echo "Checking security best practices..."
+        
+        # Check for proper error handling
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            if ! grep -q "try\|catch" "$file"; then
+              echo "Warning: $file may be missing error handling"
+            fi
+          fi
+        done
+        
+        # Check for proper logging
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            if ! grep -q "log\." "$file"; then
+              echo "Warning: $file may be missing logging"
+            fi
+          fi
+        done
+        
+    - name: Check for configuration best practices
+      run: |
+        echo "Checking configuration best practices..."
+        
+        # Check for hardcoded values that should be configurable
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            if grep -q "https://.*\.atlassian\.net\|https://.*\.jira\.com" "$file"; then
+              echo "Warning: $file may contain hardcoded URLs"
+            fi
+          fi
+        done 

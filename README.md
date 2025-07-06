@@ -9,6 +9,7 @@ A comprehensive collection of Groovy scripts for Atlassian Jira administration a
 - **Confluence Integration**: Automated space creation and management
 - **REST API Utilities**: Secure API calls using Trusted Applications
 - **Audit Tools**: Data center auditing and user activity monitoring
+- **Quality Assurance**: Automated code quality checks and security scanning
 
 ## 📋 Prerequisites
 
@@ -23,6 +24,16 @@ A comprehensive collection of Groovy scripts for Atlassian Jira administration a
 2. **Clone or download** this repository
 3. **Upload scripts** to ScriptRunner console or scheduled jobs
 4. **Configure** script parameters as needed (see individual script documentation)
+
+## 🔧 Development
+
+This project uses GitHub Actions for automated quality assurance:
+
+- **Code Quality**: Syntax checking, import validation, and best practices
+- **Security Scanning**: Checks for hardcoded credentials and security issues
+- **Documentation**: Validates markdown formatting and structure
+- **Automated Releases**: Creates releases and ZIP files on version tags
+- **Dependency Monitoring**: Weekly checks for outdated references
 
 ## 📁 Script Categories
 
@@ -55,7 +66,7 @@ A comprehensive collection of Groovy scripts for Atlassian Jira administration a
 | Script | Description | Use Case |
 |--------|-------------|----------|
 | `CreateConfluenceSpaceTest.groovy` | Standalone Confluence space creation with Application Links | Testing and development |
-| `CreateConfluenceSpaceFromIssue.groovy` | Workflow post-function for space creation from Jira issues | Production workflow automation |
+| `CreateConfluenceSpaceFromIssue.groovy` | Workflow post-function for space creation from Jira issues using Application Links | Production workflow automation |
 
 ### REST API Utilities
 

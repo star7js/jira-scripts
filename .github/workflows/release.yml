@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Create release ZIP
+      run: |
+        echo "Creating release package..."
+        VERSION=${GITHUB_REF#refs/tags/}
+        zip -r "jira-scripts-${VERSION}.zip" . -x "*.git*" "*.github*" "*.DS_Store*" "*.zip"
+        echo "Created jira-scripts-${VERSION}.zip"
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: jira-scripts-${{ github.ref_name }}.zip
+        generate_release_notes: true
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Update version in files
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "Updating version references to $VERSION"
+        
+        # Update version in CHANGELOG.md if needed
+        if [ -f "CHANGELOG.md" ]; then
+          sed -i "s/## \[Unreleased\]/## \[$VERSION\] - $(date +%Y-%m-%d)/" CHANGELOG.md
+        fi 

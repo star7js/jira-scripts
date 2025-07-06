@@ -1,0 +1,165 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  groovy-lint:
+    name: Groovy Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+        
+    - name: Install Groovy
+      run: |
+        curl -s "https://get.sdkman.io" | bash
+        source "$HOME/.sdkman/bin/sdkman-init.sh"
+        sdk install groovy
+        
+    - name: Basic Groovy syntax check
+      run: |
+        source "$HOME/.sdkman/bin/sdkman-init.sh"
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            echo "Checking syntax for $file"
+            groovy -c "$file" || exit 1
+          fi
+        done
+        
+    - name: Check for common issues
+      run: |
+        echo "Checking for common Groovy script issues..."
+        
+        # Check for proper imports
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            echo "Checking imports in $file"
+            if ! grep -q "import com.atlassian.jira.component.ComponentAccessor" "$file"; then
+              echo "Warning: $file may be missing ComponentAccessor import"
+            fi
+          fi
+        done
+        
+        # Check for configuration sections
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            echo "Checking configuration in $file"
+            if ! grep -q "CONFIGURATION SECTION" "$file"; then
+              echo "Warning: $file may be missing configuration section"
+            fi
+          fi
+        done
+
+  markdown-lint:
+    name: Markdown Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for broken links
+      run: |
+        echo "Checking for broken links in documentation..."
+        # This is a basic check - could be enhanced with a proper link checker
+        grep -r "http" *.md | grep -v "http://localhost" || true
+        
+    - name: Check markdown formatting
+      run: |
+        echo "Checking markdown formatting..."
+        # Basic markdown structure checks
+        for file in *.md; do
+          if [ -f "$file" ]; then
+            echo "Checking $file"
+            # Check for proper headers
+            if ! grep -q "^#" "$file"; then
+              echo "Warning: $file may be missing headers"
+            fi
+          fi
+        done
+
+  file-structure:
+    name: File Structure Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check file naming conventions
+      run: |
+        echo "Checking file naming conventions..."
+        
+        # Check for proper .groovy extension
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            echo "✓ Found Groovy file: $file"
+          fi
+        done
+        
+        # Check for required documentation files
+        required_files=("README.md" "CHANGELOG.md" "CONTRIBUTING.md")
+        for file in "${required_files[@]}"; do
+          if [ -f "$file" ]; then
+            echo "✓ Found required file: $file"
+          else
+            echo "✗ Missing required file: $file"
+            exit 1
+          fi
+        done
+        
+        # Check for template directory
+        if [ -d "templates" ]; then
+          echo "✓ Found templates directory"
+        else
+          echo "✗ Missing templates directory"
+          exit 1
+        fi
+        
+        # Check for examples directory
+        if [ -d "examples" ]; then
+          echo "✓ Found examples directory"
+        else
+          echo "✗ Missing examples directory"
+          exit 1
+        fi
+
+  security:
+    name: Security Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for hardcoded credentials
+      run: |
+        echo "Checking for potential security issues..."
+        
+        # Check for hardcoded passwords or tokens
+        if grep -r -i "password\|token\|secret\|key" *.groovy | grep -v "//\|/\*\|#"; then
+          echo "Warning: Potential hardcoded credentials found"
+          grep -r -i "password\|token\|secret\|key" *.groovy | grep -v "//\|/\*\|#"
+        else
+          echo "✓ No obvious hardcoded credentials found"
+        fi
+        
+        # Check for proper credential handling
+        for file in *.groovy; do
+          if [ -f "$file" ]; then
+            if grep -q "SecureFieldsService\|ApplicationLink" "$file"; then
+              echo "✓ $file uses proper credential handling"
+            fi
+          fi
+        done 
