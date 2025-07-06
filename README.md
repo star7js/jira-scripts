@@ -1,5 +1,9 @@
 # Jira Scripts
 
+[![Code Quality](https://github.com/star7js/jira-scripts/workflows/Code%20Quality/badge.svg)](https://github.com/star7js/jira-scripts/actions)
+[![Dependency Check](https://github.com/star7js/jira-scripts/workflows/Dependency%20Check/badge.svg)](https://github.com/star7js/jira-scripts/actions)
+[![Release](https://github.com/star7js/jira-scripts/workflows/Release/badge.svg)](https://github.com/star7js/jira-scripts/actions)
+
 A comprehensive collection of Groovy scripts for Atlassian Jira administration and automation. These scripts provide powerful tools for user management, permission auditing, Confluence integration, and REST API operations.
 
 ## 🚀 Features
@@ -177,11 +181,33 @@ For issues or questions:
 
 ## 🔄 Version History
 
+- **v1.1.1**: Enhanced CI/CD and security
+  - Fixed GitHub Actions permissions
+  - Added comprehensive CI badges
+  - Improved release workflow
+
+- **v1.1.0**: GitHub Actions and automation
+  - Added comprehensive CI/CD workflows
+  - Enhanced security scanning
+  - Automated releases and dependency checks
+  - Added issue and PR templates
+
 - **v1.0**: Initial script collection
-- User management scripts
-- Permission auditing tools
-- Confluence integration
-- REST API utilities
+  - User management scripts
+  - Permission auditing tools
+  - Confluence integration
+  - REST API utilities
+
+## 🚀 Future Enhancements
+
+We're continuously working to expand our script collection and improve functionality. Planned areas for future development include:
+
+- **Issue Management**: Cloning, linking, moving, and bulk operations
+- **Custom Field Management**: Creation, updates, and value setting
+- **Workflow Automation**: Validation, transition checking, and condition management
+- **Project Management**: Creation, components, and version management
+- **Reporting and Analytics**: Statistics, activity tracking, and health metrics
+- **Enhanced Security**: Advanced auditing, access analysis, and compliance tools
 
 ---
 
