@@ -46,6 +46,7 @@ class ProjectCreationScript {
     private static final String ALL_EMPLOYEES_EDIT = "Should All Employees Have The Ability To Create/Edit Issues In This Project?"
     private static final String USE_WITH_JIP = "Will This Project Be Used With JIP Or Jira Integration Plus"
     private static final String OPSEC_PROGRAM = "OPSEC Program to onboard to"
+    private static final String NEW_PROJECT_NAME_FIELD = "New Project Or Team Space Name"
     private static final String ALL_EMPLOYEES_GROUP = "jira-users" // Default group for all employees
 
     // Role Names
@@ -143,6 +144,7 @@ class ProjectCreationScript {
         try {
             // Extract project details from issue
             def projectDetails = extractProjectDetails(issue)
+            log.info("Extracted project details: ${projectDetails}")
             
             if (!projectDetails) {
                 log.error("Failed to extract project details from issue ${issue.key}")
@@ -227,7 +229,7 @@ class ProjectCreationScript {
             details.projectName = rawProjectName.replaceAll(/[<>:"\/\\|?*]/, "") // Remove invalid chars
             
             // Get custom field values
-            details.projectKey = generateProjectKey(issue)
+            details.projectKey = generateProjectKey(issue, getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD))
             details.projectType = getCustomFieldValue(issue, PROJECT_TYPE)
             details.projectLead = getCustomFieldValue(issue, PROJECT_LEAD)
             details.adminUsers = getCustomFieldValue(issue, ADMIN_USERS)
@@ -436,44 +438,66 @@ class ProjectCreationScript {
     }
     
     /**
-     * Generate a more robust project key based on issue and timestamp
-     * Ensures key follows Jira format: starts with letter, 2-10 chars, uppercase alphanumeric
+     * Generate a robust project key.
+     * 1. From initials of "New Project Or Team Space Name" custom field.
+     * 2. Fallback to initials of the issue summary.
+     * 3. Fallback to letters from the issue key.
+     * Ensures the key is unique, uppercase, 2-10 chars, and starts with a letter.
      */
-    private String generateProjectKey(Issue issue) {
-        // Extract letters from issue key
-        def baseKey = issue.key.replaceAll("[^A-Z]", "")
-        
-        // If base key is too short or doesn't start with letter, use project name
-        if (baseKey.length() < 2 || !baseKey.matches("^[A-Z].*")) {
-            baseKey = issue.summary.toUpperCase()
+    private String generateProjectKey(Issue issue, String newProjectName) {
+        String baseKey = ""
+
+        // 1. Try to get initials from the custom field
+        if (newProjectName?.trim()) {
+            baseKey = newProjectName.split(/\s+/)
+                .findAll { it }
+                .collect { it[0] }
+                .join("")
+                .toUpperCase()
                 .replaceAll("[^A-Z]", "")
-                .take(4)
-            
-            // Ensure it starts with a letter
-            if (!baseKey.matches("^[A-Z].*")) {
-                baseKey = "PR" + baseKey  // Default prefix if no letters found
-            }
+        }
+
+        // 2. Fallback to issue summary if custom field didn't yield a valid base
+        if (!baseKey || baseKey.length() < 2) {
+            baseKey = issue.summary.toUpperCase()
+                .split(/\s+/)
+                .findAll { it }
+                .collect { it[0] }
+                .join("")
+                .replaceAll("[^A-Z]", "")
+        }
+
+        // 3. Fallback to issue key if summary also failed
+        if (!baseKey || baseKey.length() < 2) {
+            baseKey = issue.key.replaceAll("[^A-Z]", "")
         }
         
+        // Ensure baseKey is valid and has a prefix if needed
+        if (!baseKey || !baseKey.matches("^[A-Z].*")) {
+            baseKey = "P" + (baseKey ?: "") // Prefix with 'P' if it doesn't start with a letter
+        }
+
+        baseKey = baseKey.take(4) // Take up to 4 characters for the base
+
         // Generate a hash of the issue key + timestamp for uniqueness
         def uniqueString = "${issue.key}-${System.currentTimeMillis()}"
         def messageDigest = MessageDigest.getInstance("MD5")
         def hashBytes = messageDigest.digest(uniqueString.getBytes())
         def hashString = hashBytes.encodeHex().toString().toUpperCase().replaceAll("[^A-Z0-9]", "")
-        
+
         // Combine base key with hash suffix (ensure total length 2-10 chars)
         def maxSuffixLength = Math.max(0, 10 - baseKey.length())
         def suffix = hashString.take(maxSuffixLength)
         def projectKey = "${baseKey}${suffix}".take(10)
-        
-        // Validate the generated key
-        if (!projectKey.matches("[A-Z][A-Z0-9]{1,9}")) {
-            log.error("Invalid project key generated: ${projectKey}")
-            // Fallback to a safe default
+
+        // Final validation and fallback to a completely safe key
+        if (!projectKey || !projectKey.matches("[A-Z][A-Z0-9]{1,9}")) {
+            log.error("Invalid project key generated: '${projectKey}'. Falling back to default.")
             def timestamp = System.currentTimeMillis().toString().takeLast(6)
-            projectKey = "PR${timestamp}" // Always starts with letters, max 8 chars
+            projectKey = "PR${timestamp}"
         }
         
+        log.info("Generated project key: ${projectKey} for issue ${issue.key}")
         return projectKey
     }
     
