@@ -18,6 +18,8 @@ import com.atlassian.cache.CacheManager
 import com.atlassian.cache.Cache
 import com.atlassian.cache.CacheSettingsBuilder
 import com.atlassian.beehive.ClusterLockService
+import com.atlassian.jira.bc.projectroles.ProjectRoleService
+import com.atlassian.jira.bc.ServiceErrorCollection
 import org.apache.log4j.Logger
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
@@ -72,6 +74,7 @@ class ProjectCreationScript {
     private ClusterLockService clusterLockService
     private CommentManager commentManager
     private PermissionSchemeManager permissionSchemeManager
+    private ProjectRoleService projectRoleService
     
     ProjectCreationScript() {
         initializeServices()
@@ -156,6 +159,7 @@ class ProjectCreationScript {
         this.clusterLockService = ComponentAccessor.getComponent(ClusterLockService.class)
         this.commentManager = ComponentAccessor.getCommentManager()
         this.permissionSchemeManager = ComponentAccessor.getPermissionSchemeManager()
+        this.projectRoleService = ComponentAccessor.getComponent(ProjectRoleService.class)
     }
     
     /**
@@ -228,13 +232,6 @@ class ProjectCreationScript {
                 def result = createProjectWithRetry(projectDetails)
                 
                 if (result.success) {
-                    // Update the project type as a separate step to avoid event listener bugs
-                    def updateTypeResult = updateProjectType(result.project, projectDetails.projectType)
-                    if (!updateTypeResult.success) {
-                        addCommentToIssue(issue, "Project created, but failed to set project type: ${updateTypeResult.error}")
-                        return updateTypeResult
-                    }
-
                     // Clear cache after successful creation
                     clearProjectCache(projectDetails.projectKey)
                     log.warn("Successfully created project: ${projectDetails.projectKey}")
@@ -395,9 +392,9 @@ class ProjectCreationScript {
             .withLead(leadUser)
             .withAssigneeType(AssigneeTypes.PROJECT_LEAD)
         
-        // Set project type - Omitted during initial creation to avoid event listener bug
-        // def projectTypeKey = PROJECT_TYPE_MAPPING[details.projectType] ?: "business"
-        builder.withType("business")
+        // Set project type
+        def projectTypeKey = PROJECT_TYPE_MAPPING[details.projectType] ?: "business"
+        builder.withType(projectTypeKey)
         
         def projectCreationData = builder.build()
         
@@ -449,34 +446,9 @@ class ProjectCreationScript {
         }
         
         // Configure project permissions
-        // configureProjectPermissions(project, details)
+        configureProjectPermissions(project, details)
         
         return [success: true, project: project]
-    }
-    
-    /**
-     * Updates the project type after creation to work around event listener bugs.
-     */
-    private Map updateProjectType(Project project, String projectTypeName) {
-        log.warn("Updating project type for project ${project.key} to ${projectTypeName}")
-        def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
-        def projectTypeKey = PROJECT_TYPE_MAPPING[projectTypeName] ?: "business"
-
-        if (!projectTypeKey) {
-            log.warn("No project type key found for type name '${projectTypeName}', skipping update.")
-            return [success: true] 
-        }
-
-        def result = projectService.updateProjectType(currentUser, project.key, projectTypeKey)
-
-        if (!result.isValid()) {
-            def errors = result.errorCollection.errors.collect { "${it.key}: ${it.value}" }.join(", ")
-            log.error("Failed to update project type for ${project.key}: ${errors}")
-            return [success: false, error: "Failed to update project type: ${errors}"]
-        }
-        
-        log.warn("Successfully updated project type for ${project.key} to ${projectTypeKey}")
-        return [success: true]
     }
     
     /**
@@ -520,25 +492,23 @@ class ProjectCreationScript {
             return
         }
 
-        def userKeys = usernames.collect { username ->
-            def user = ComponentAccessor.userManager.getUserByName(username?.trim())
-            if (user) {
-                log.warn("Found user '${username}' for role '${roleName}'")
-                return user.key
-            } else {
-                log.warn("User '${username}' not found, cannot add to role '${roleName}'")
-            }
-            return null
+        def users = usernames.collect { username ->
+            ComponentAccessor.getUserManager().getUserByName(username?.trim())
         }.findAll { it != null }
 
-        if (userKeys) {
-            log.warn("Adding users with keys ${userKeys} to role '${roleName}' in project '${project.key}'")
-            projectRoleManager.addActorsToProjectRole(
-                userKeys,
-                role,
-                project,
-                ProjectRoleActor.USER_ROLE_ACTOR_TYPE
+        if (users) {
+            log.warn("Adding users ${users*.name} to role '${roleName}' in project '${project.key}'")
+            def errorCollection = new ServiceErrorCollection()
+            projectRoleService.addActorsToProjectRole(
+                    users,
+                    role,
+                    project,
+                    ProjectRoleActor.USER_ROLE_ACTOR_TYPE,
+                    errorCollection
             )
+            if (errorCollection.hasAnyErrors()) {
+                log.error("Failed to add users to role: ${errorCollection.errorMessages}")
+            }
         }
     }
 
@@ -553,12 +523,17 @@ class ProjectCreationScript {
         }
 
         log.warn("Adding group '${groupName}' to role '${roleName}' in project '${project.key}'")
-        projectRoleManager.addActorsToProjectRole(
+        def errorCollection = new ServiceErrorCollection()
+        projectRoleService.addActorsToProjectRole(
                 [groupName],
                 role,
                 project,
-                ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE
+                ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE,
+                errorCollection
         )
+        if (errorCollection.hasAnyErrors()) {
+            log.error("Failed to add group to role: ${errorCollection.errorMessages}")
+        }
     }
     
     /**
@@ -594,8 +569,8 @@ class ProjectCreationScript {
                         return item.toString()
                     }
                 }.join(",")
-            } else if (value instanceof ApplicationUser) {
-                return value.getUsername()
+            } else if (item instanceof ApplicationUser) {
+                return item.getUsername()
             } else {
                 return value.toString()?.trim()
             }
