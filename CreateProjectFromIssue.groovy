@@ -28,6 +28,7 @@ import java.security.MessageDigest
 /**
  * Jira Data Center compatible project creation script
  * Handles multi-node environments with proper locking and caching
+ * Fixed version with improved null handling and validation
  */
 class ProjectCreationScript {
     
@@ -77,6 +78,32 @@ class ProjectCreationScript {
     
     ProjectCreationScript() {
         initializeServices()
+    }
+    
+    /**
+     * Validate required custom fields exist before processing
+     */
+    private Map validateCustomFields() {
+        def requiredFields = [NEW_PROJECT_NAME_FIELD, PROJECT_TYPE, PROJECT_LEAD]
+        def missingFields = []
+        def fieldDetails = [:]
+
+        requiredFields.each { fieldName ->
+            def field = customFieldManager.getCustomFieldObjectByName(fieldName)
+            if (!field) {
+                missingFields.add(fieldName)
+            } else {
+                fieldDetails[fieldName] = field
+                log.info("Found custom field: ${fieldName} (ID: ${field.id})")
+            }
+        }
+
+        if (missingFields) {
+            log.error("Missing required custom fields: ${missingFields}")
+            return [success: false, error: "Missing custom fields: ${missingFields.join(', ')}", fields: fieldDetails]
+        }
+        
+        return [success: true, fields: fieldDetails]
     }
     
     /**
@@ -139,30 +166,52 @@ class ProjectCreationScript {
      * Main entry point for creating a project from an issue
      */
     def createProjectFromIssue(Issue issue) {
-        log.info("Starting project creation from issue: ${issue.key}")
+        log.info("Starting project creation from issue: ${issue?.key}")
         
         try {
+            // Validate issue first
+            if (!issue) {
+                log.error("Issue is null")
+                return [success: false, error: "Issue is null"]
+            }
+            
+            // Validate custom fields exist
+            def fieldValidation = validateCustomFields()
+            if (!fieldValidation.success) {
+                addCommentToIssue(issue, "Error: ${fieldValidation.error}")
+                return fieldValidation
+            }
+            
             // Extract project details from issue
             def projectDetails = extractProjectDetails(issue)
             log.info("Extracted project details: ${projectDetails}")
             
             if (!projectDetails) {
                 log.error("Failed to extract project details from issue ${issue.key}")
+                addCommentToIssue(issue, "Error: Failed to extract project details. Check that all required custom fields are filled.")
                 return [success: false, error: "Failed to extract project details"]
             }
             
+            // CRITICAL: Validate project key was generated successfully
+            if (!projectDetails.projectKey || projectDetails.projectKey.trim().isEmpty()) {
+                log.error("Failed to generate valid project key for issue ${issue.key}")
+                addCommentToIssue(issue, "Error: Could not generate project key. Check custom fields and issue summary.")
+                return [success: false, error: "Project key generation failed"]
+            }
+            
             // Validate project doesn't already exist
-            if (projectExists(projectDetails.key)) {
-                log.warn("Project with key ${projectDetails.key} already exists")
-                return [success: false, error: "Project with key ${projectDetails.key} already exists"]
+            if (projectExists(projectDetails.projectKey)) {
+                log.warn("Project with key ${projectDetails.projectKey} already exists")
+                addCommentToIssue(issue, "Error: Project with key ${projectDetails.projectKey} already exists")
+                return [success: false, error: "Project with key ${projectDetails.projectKey} already exists"]
             }
             
             // Acquire distributed lock for project creation using ClusterLockService
-            def lockKey = LOCK_PREFIX + projectDetails.key
+            def lockKey = LOCK_PREFIX + projectDetails.projectKey
             def lock = clusterLockService.getLockForName(lockKey)
             
             if (!lock.tryLock(LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                log.error("Failed to acquire cluster lock for project creation: ${projectDetails.key}")
+                log.error("Failed to acquire cluster lock for project creation: ${projectDetails.projectKey}")
                 addCommentToIssue(issue, "Failed to create project: Another process is currently creating this project. Please try again.")
                 return [success: false, error: "Another process is creating this project"]
             }
@@ -173,8 +222,9 @@ class ProjectCreationScript {
             
             try {
                 // Double-check project doesn't exist after acquiring lock
-                if (projectExists(projectDetails.key)) {
-                    log.warn("Project with key ${projectDetails.key} was created by another node")
+                if (projectExists(projectDetails.projectKey)) {
+                    log.warn("Project with key ${projectDetails.projectKey} was created by another node")
+                    addCommentToIssue(issue, "Project with key ${projectDetails.projectKey} was created by another process")
                     return [success: false, error: "Project was created by another process"]
                 }
                 
@@ -183,15 +233,15 @@ class ProjectCreationScript {
                 
                 if (result.success) {
                     // Clear cache after successful creation
-                    clearProjectCache(projectDetails.key)
-                    log.info("Successfully created project: ${projectDetails.key}")
+                    clearProjectCache(projectDetails.projectKey)
+                    log.info("Successfully created project: ${projectDetails.projectKey}")
                     
                     // Copy and assign permissions scheme while still holding the lock
                     def permissionResult = copyAndAssignPermissionScheme(issue, result.project, projectDetails)
                     if (permissionResult.success) {
-                        addCommentToIssue(issue, "Successfully created project: ${projectDetails.key} with permissions configured")
+                        addCommentToIssue(issue, "Successfully created project: ${projectDetails.projectKey} with permissions configured")
                     } else {
-                        addCommentToIssue(issue, "Project created: ${projectDetails.key}, but permission scheme assignment failed: ${permissionResult.error}")
+                        addCommentToIssue(issue, "Project created: ${projectDetails.projectKey}, but permission scheme assignment failed: ${permissionResult.error}")
                         // Update the result to indicate partial success
                         result.permissionError = permissionResult.error
                     }
@@ -206,7 +256,7 @@ class ProjectCreationScript {
             }
             
         } catch (Exception e) {
-            log.error("Error creating project from issue ${issue.key}", e)
+            log.error("Error creating project from issue ${issue?.key}", e)
             addCommentToIssue(issue, "Failed to create project: ${e.message}")
             return [success: false, error: "Unexpected error: ${e.message}"]
         }
@@ -214,22 +264,32 @@ class ProjectCreationScript {
     
     /**
      * Extract project details from issue custom fields
+     * Improved with better null handling and validation
      */
     private Map extractProjectDetails(Issue issue) {
         try {
             def details = [:]
             
+            // Validate issue first
+            if (!issue) {
+                log.error("Issue is null")
+                return null
+            }
+            
             // Get and sanitize project name
             def rawProjectName = issue.summary?.trim()
             if (!rawProjectName || rawProjectName.length() > 80) {
-                log.error("Invalid project name: empty or too long")
+                log.error("Invalid project name: empty or too long (${rawProjectName?.length()} chars)")
                 return null
             }
             
             details.projectName = rawProjectName.replaceAll(/[<>:"\/\\|?*]/, "") // Remove invalid chars
             
-            // Get custom field values
-            details.projectKey = generateProjectKey(issue, getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD))
+            // Get custom field values with improved error handling
+            def newProjectNameValue = getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD)
+            log.info("New Project Name field value: '${newProjectNameValue}'")
+            
+            details.projectKey = generateProjectKey(issue, newProjectNameValue)
             details.projectType = getCustomFieldValue(issue, PROJECT_TYPE)
             details.projectLead = getCustomFieldValue(issue, PROJECT_LEAD)
             details.adminUsers = getCustomFieldValue(issue, ADMIN_USERS)
@@ -239,9 +299,12 @@ class ProjectCreationScript {
             details.useWithJIP = getCustomFieldValue(issue, USE_WITH_JIP)
             details.opsecProgram = getCustomFieldValue(issue, OPSEC_PROGRAM)
             
+            // Log all extracted values for debugging
+            log.info("Extracted values - Name: '${details.projectName}', Key: '${details.projectKey}', Type: '${details.projectType}', Lead: '${details.projectLead}'")
+            
             // Validate required fields
             if (!details.projectName || !details.projectKey || !details.projectType || !details.projectLead) {
-                log.error("Missing required fields for project creation")
+                log.error("Missing required fields for project creation - Name: ${details.projectName}, Key: ${details.projectKey}, Type: ${details.projectType}, Lead: ${details.projectLead}")
                 return null
             }
             
@@ -403,42 +466,49 @@ class ProjectCreationScript {
     /**
      * Enhanced helper method to get custom field values
      * Handles Options, multi-selects, and various field types
+     * Improved with better null handling and logging
      */
     private String getCustomFieldValue(Issue issue, String fieldName) {
-        def customField = customFieldManager.getCustomFieldObjectByName(fieldName)
-        if (!customField) {
-            log.error("Critical: Custom field '${fieldName}' not found in Jira configuration")
+        try {
+            def customField = customFieldManager.getCustomFieldObjectByName(fieldName)
+            if (!customField) {
+                log.error("Critical: Custom field '${fieldName}' not found in Jira configuration")
+                return null
+            }
+            
+            def value = issue.getCustomFieldValue(customField)
+            if (value == null) {
+                log.info("Custom field '${fieldName}' has null value for issue ${issue.key}")
+                return null
+            }
+            
+            // Handle different field types
+            if (value instanceof Option) {
+                return value.getValue()
+            } else if (value instanceof List) {
+                // Handle multi-select fields
+                return value.collect { item ->
+                    if (item instanceof Option) {
+                        return item.getValue()
+                    } else if (item instanceof ApplicationUser) {
+                        return item.getUsername()
+                    } else {
+                        return item.toString()
+                    }
+                }.join(",")
+            } else if (value instanceof ApplicationUser) {
+                return value.getUsername()
+            } else {
+                return value.toString()?.trim()
+            }
+        } catch (Exception e) {
+            log.error("Error getting custom field value for '${fieldName}'", e)
             return null
-        }
-        
-        def value = issue.getCustomFieldValue(customField)
-        if (value == null) {
-            return null
-        }
-        
-        // Handle different field types
-        if (value instanceof Option) {
-            return value.getValue()
-        } else if (value instanceof List) {
-            // Handle multi-select fields
-            return value.collect { item ->
-                if (item instanceof Option) {
-                    return item.getValue()
-                } else if (item instanceof ApplicationUser) {
-                    return item.getUsername()
-                } else {
-                    return item.toString()
-                }
-            }.join(",")
-        } else if (value instanceof ApplicationUser) {
-            return value.getUsername()
-        } else {
-            return value.toString()?.trim()
         }
     }
     
     /**
-     * Generate a robust project key.
+     * Generate a robust project key with improved null handling and validation
      * 1. From initials of "New Project Or Team Space Name" custom field.
      * 2. Fallback to initials of the issue summary.
      * 3. Fallback to letters from the issue key.
@@ -447,78 +517,110 @@ class ProjectCreationScript {
     private String generateProjectKey(Issue issue, String newProjectName) {
         String baseKey = ""
 
-        // 1. Try to get initials from the custom field
-        if (newProjectName?.trim()) {
-            baseKey = newProjectName.split(/\s+/)
-                .findAll { it }
-                .collect { it[0] }
-                .join("")
-                .toUpperCase()
-                .replaceAll("[^A-Z]", "")
-        }
+        try {
+            // 1. Try to get initials from the custom field with better null handling
+            if (newProjectName?.trim()) {
+                def words = newProjectName.trim().split(/\s+/).findAll { it?.trim() }
+                if (words.size() > 0) {
+                    baseKey = words.collect { word -> 
+                        word.trim() ? word[0].toUpperCase() : ""
+                    }.findAll { it }.join("").replaceAll("[^A-Z]", "")
+                }
+                log.info("Generated base key from custom field: '${baseKey}' from '${newProjectName}'")
+            }
 
-        // 2. Fallback to issue summary if custom field didn't yield a valid base
-        if (!baseKey || baseKey.length() < 2) {
-            baseKey = issue.summary.toUpperCase()
-                .split(/\s+/)
-                .findAll { it }
-                .collect { it[0] }
-                .join("")
-                .replaceAll("[^A-Z]", "")
-        }
+            // 2. Fallback to issue summary with better handling
+            if (!baseKey || baseKey.length() < 2) {
+                def summary = issue.summary?.trim()
+                if (summary) {
+                    def words = summary.split(/\s+/).findAll { it?.trim() }
+                    if (words.size() > 0) {
+                        baseKey = words.collect { word -> 
+                            word.trim() ? word[0].toUpperCase() : ""
+                        }.findAll { it }.join("").replaceAll("[^A-Z]", "")
+                    }
+                }
+                log.info("Generated base key from summary: '${baseKey}' from '${summary}'")
+            }
 
-        // 3. Fallback to issue key if summary also failed
-        if (!baseKey || baseKey.length() < 2) {
-            baseKey = issue.key.replaceAll("[^A-Z]", "")
-        }
-        
-        // Ensure baseKey is valid and has a prefix if needed
-        if (!baseKey || !baseKey.matches("^[A-Z].*")) {
-            baseKey = "P" + (baseKey ?: "") // Prefix with 'P' if it doesn't start with a letter
-        }
+            // 3. Final fallback - use issue key
+            if (!baseKey || baseKey.length() < 2) {
+                baseKey = issue.key?.replaceAll("[^A-Z]", "") ?: "PROJ"
+                log.info("Generated base key from issue key: '${baseKey}' from '${issue.key}'")
+            }
+            
+            // Ensure we always have a valid starting point
+            if (!baseKey || !baseKey.matches("^[A-Z].*")) {
+                baseKey = "PROJ" // Safe default
+                log.warn("Using default base key: ${baseKey}")
+            }
 
-        baseKey = baseKey.take(4) // Take up to 4 characters for the base
+            baseKey = baseKey.take(4) // Take up to 4 characters for the base
 
-        // Generate a hash of the issue key + timestamp for uniqueness
-        def uniqueString = "${issue.key}-${System.currentTimeMillis()}"
-        def messageDigest = MessageDigest.getInstance("MD5")
-        def hashBytes = messageDigest.digest(uniqueString.getBytes())
-        def hashString = hashBytes.encodeHex().toString().toUpperCase().replaceAll("[^A-Z0-9]", "")
+            // Generate a hash of the issue key + timestamp for uniqueness
+            def uniqueString = "${issue.key}-${System.currentTimeMillis()}"
+            def messageDigest = MessageDigest.getInstance("MD5")
+            def hashBytes = messageDigest.digest(uniqueString.getBytes())
+            def hashString = hashBytes.encodeHex().toString().toUpperCase().replaceAll("[^A-Z0-9]", "")
 
-        // Combine base key with hash suffix (ensure total length 2-10 chars)
-        def maxSuffixLength = Math.max(0, 10 - baseKey.length())
-        def suffix = hashString.take(maxSuffixLength)
-        def projectKey = "${baseKey}${suffix}".take(10)
+            // Combine base key with hash suffix (ensure total length 2-10 chars)
+            def maxSuffixLength = Math.max(0, 10 - baseKey.length())
+            def suffix = hashString.take(maxSuffixLength)
+            def projectKey = "${baseKey}${suffix}".take(10)
 
-        // Final validation and fallback to a completely safe key
-        if (!projectKey || !projectKey.matches("[A-Z][A-Z0-9]{1,9}")) {
-            log.error("Invalid project key generated: '${projectKey}'. Falling back to default.")
+            // Final validation and fallback to a completely safe key
+            if (!projectKey || !projectKey.matches("[A-Z][A-Z0-9]{1,9}")) {
+                log.error("Invalid project key generated: '${projectKey}'. Falling back to default.")
+                def timestamp = System.currentTimeMillis().toString().takeLast(6)
+                projectKey = "PR${timestamp}"
+            }
+            
+            log.info("Generated project key: ${projectKey} for issue ${issue.key}")
+            return projectKey
+            
+        } catch (Exception e) {
+            log.error("Error generating project key", e)
+            // Emergency fallback
             def timestamp = System.currentTimeMillis().toString().takeLast(6)
-            projectKey = "PR${timestamp}"
+            def emergencyKey = "ER${timestamp}"
+            log.warn("Using emergency project key: ${emergencyKey}")
+            return emergencyKey
         }
-        
-        log.info("Generated project key: ${projectKey} for issue ${issue.key}")
-        return projectKey
     }
     
     private boolean projectExists(String projectKey) {
-        // Check cache first
-        def cache = getProjectCache()
-        if (cache.get(projectKey)) {
-            return true
+        // Validate project key first
+        if (!projectKey || projectKey.trim().isEmpty()) {
+            log.error("Cannot check if project exists: project key is null or empty")
+            return false
         }
         
-        // Check database
-        def project = projectManager.getProjectObjByKey(projectKey)
-        if (project) {
-            cache.put(projectKey, true)
-            return true
+        try {
+            // Check cache first
+            def cache = getProjectCache()
+            if (cache.get(projectKey)) {
+                return true
+            }
+            
+            // Check database
+            def project = projectManager.getProjectObjByKey(projectKey)
+            if (project) {
+                cache.put(projectKey, true)
+                return true
+            }
+            
+            return false
+        } catch (Exception e) {
+            log.error("Error checking if project exists: ${projectKey}", e)
+            return false
         }
-        
-        return false
     }
     
     private List<String> parseUserList(String userList) {
+        if (!userList?.trim()) {
+            return []
+        }
+        
         return userList.split("[,;\\s]+")
             .collect { it.trim() }
             .findAll { it }
@@ -533,8 +635,12 @@ class ProjectCreationScript {
     }
     
     private void clearProjectCache(String projectKey) {
-        def cache = getProjectCache()
-        cache.remove(projectKey)
+        try {
+            def cache = getProjectCache()
+            cache.remove(projectKey)
+        } catch (Exception e) {
+            log.error("Error clearing project cache", e)
+        }
     }
     
     /**
@@ -542,8 +648,14 @@ class ProjectCreationScript {
      */
     private void addCommentToIssue(Issue issue, String message) {
         try {
+            if (!issue) {
+                log.error("Cannot add comment: issue is null")
+                return
+            }
+            
             def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
             commentManager.create(issue, currentUser, message, false)
+            log.info("Added comment to issue ${issue.key}: ${message}")
         } catch (Exception e) {
             log.error("Failed to add comment to issue", e)
         }
@@ -574,6 +686,9 @@ class CopyPermissionsScheme {
      * Generate a new permissions scheme name based on the project name
      */
     String generateSchemeName(String projectName) {
+        if (!projectName?.trim()) {
+            return "app-jira-default-permissions-scheme"
+        }
         return "app-jira-${projectName.toLowerCase().trim().replaceAll(/\s+/, '-')}-permissions-scheme"
     }
     
@@ -586,7 +701,7 @@ class CopyPermissionsScheme {
         try {
             // Validate parameters
             if (!projectName?.trim()) {
-                log.error("Invalid combination: allEmployeesCanEdit is true but allEmployeesCanView is false")
+                log.error("Project name is required")
                 return [success: false, error: "Project name is required"]
             }
             
@@ -710,6 +825,14 @@ class CopyPermissionsScheme {
 // Script execution entry point
 def issue = issue  // The issue variable should be available in the script context
 
+// Validate that issue exists before proceeding
+if (!issue) {
+    log.error("Script execution failed: issue variable is null or not available")
+    return
+}
+
+log.info("Starting project creation script execution for issue: ${issue.key}")
+
 // Create and configure the project - all operations happen within the same lock
 def projectScript = new ProjectCreationScript()
 def result = projectScript.createProjectFromIssue(issue)
@@ -720,4 +843,7 @@ if (!result.success) {
     log.error("Project creation workflow failed: ${result.error}")
 } else {
     log.info("Project creation workflow completed successfully")
+    if (result.permissionError) {
+        log.warn("Project created but with permission issues: ${result.permissionError}")
+    }
 }
