@@ -228,6 +228,13 @@ class ProjectCreationScript {
                 def result = createProjectWithRetry(projectDetails)
                 
                 if (result.success) {
+                    // Update the project type as a separate step to avoid event listener bugs
+                    def updateTypeResult = updateProjectType(result.project, projectDetails.projectType)
+                    if (!updateTypeResult.success) {
+                        addCommentToIssue(issue, "Project created, but failed to set project type: ${updateTypeResult.error}")
+                        return updateTypeResult
+                    }
+
                     // Clear cache after successful creation
                     clearProjectCache(projectDetails.projectKey)
                     log.warn("Successfully created project: ${projectDetails.projectKey}")
@@ -388,9 +395,9 @@ class ProjectCreationScript {
             .withLead(leadUser)
             .withAssigneeType(AssigneeTypes.PROJECT_LEAD)
         
-        // Set project type
-        def projectTypeKey = PROJECT_TYPE_MAPPING[details.projectType] ?: "business"
-        builder.withType(projectTypeKey)
+        // Set project type - Omitted during initial creation to avoid event listener bug
+        // def projectTypeKey = PROJECT_TYPE_MAPPING[details.projectType] ?: "business"
+        // builder.withType(projectTypeKey)
         
         def projectCreationData = builder.build()
         
@@ -445,6 +452,31 @@ class ProjectCreationScript {
         // configureProjectPermissions(project, details)
         
         return [success: true, project: project]
+    }
+    
+    /**
+     * Updates the project type after creation to work around event listener bugs.
+     */
+    private Map updateProjectType(Project project, String projectTypeName) {
+        log.warn("Updating project type for project ${project.key} to ${projectTypeName}")
+        def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
+        def projectTypeKey = PROJECT_TYPE_MAPPING[projectTypeName] ?: "business"
+
+        if (!projectTypeKey) {
+            log.warn("No project type key found for type name '${projectTypeName}', skipping update.")
+            return [success: true] 
+        }
+
+        def result = projectService.updateProjectType(currentUser, project.key, projectTypeKey)
+
+        if (!result.isValid()) {
+            def errors = result.errorCollection.errors.collect { "${it.key}: ${it.value}" }.join(", ")
+            log.error("Failed to update project type for ${project.key}: ${errors}")
+            return [success: false, error: "Failed to update project type: ${errors}"]
+        }
+        
+        log.warn("Successfully updated project type for ${project.key} to ${projectTypeKey}")
+        return [success: true]
     }
     
     /**
