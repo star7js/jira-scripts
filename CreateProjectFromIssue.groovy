@@ -397,7 +397,7 @@ class ProjectCreationScript {
         
         // Set project type - Omitted during initial creation to avoid event listener bug
         // def projectTypeKey = PROJECT_TYPE_MAPPING[details.projectType] ?: "business"
-        // builder.withType(projectTypeKey)
+        builder.withType("business")
         
         def projectCreationData = builder.build()
         
