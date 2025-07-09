@@ -71,7 +71,6 @@ class ProjectCreationScript {
     private ProjectRoleManager projectRoleManager
     private CustomFieldManager customFieldManager
     private CacheManager cacheManager
-    private TransactionTemplate transactionTemplate
     private ClusterLockService clusterLockService
     private CommentManager commentManager
     private PermissionSchemeManager permissionSchemeManager
@@ -156,7 +155,6 @@ class ProjectCreationScript {
         this.projectRoleManager = ComponentAccessor.getComponent(ProjectRoleManager.class)
         this.customFieldManager = ComponentAccessor.getCustomFieldManager()
         this.cacheManager = ComponentAccessor.getComponent(CacheManager.class)
-        this.transactionTemplate = ComponentAccessor.getComponent(TransactionTemplate.class)
         this.clusterLockService = ComponentAccessor.getComponent(ClusterLockService.class)
         this.commentManager = ComponentAccessor.getCommentManager()
         this.permissionSchemeManager = ComponentAccessor.getPermissionSchemeManager()
@@ -327,10 +325,9 @@ class ProjectCreationScript {
             attempts++
             
             try {
-                // Use transaction template for database operations
-                return transactionTemplate.execute { ->
-                    createProject(projectDetails)
-                }
+                // Create the project directly without a transaction template
+                return createProject(projectDetails)
+                
             } catch (Exception e) {
                 lastError = e
                 log.warn("Project creation attempt ${attempts} failed: ${e.message}")
