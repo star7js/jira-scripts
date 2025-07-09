@@ -196,7 +196,7 @@ class ProjectCreationScript {
             }
             
             // Validate project doesn't already exist
-            if (projectExists(projectDetails.projectKey)) {
+            if (projectExists(projectDetails.projectKey, projectDetails.projectName)) {
                 log.warn("Project with key ${projectDetails.projectKey} already exists")
                 addCommentToIssue(issue, "Error: Project with key ${projectDetails.projectKey} already exists")
                 return [success: false, error: "Project with key ${projectDetails.projectKey} already exists"]
@@ -218,7 +218,7 @@ class ProjectCreationScript {
             
             try {
                 // Double-check project doesn't exist after acquiring lock
-                if (projectExists(projectDetails.projectKey)) {
+                if (projectExists(projectDetails.projectKey, projectDetails.projectName)) {
                     log.warn("Project with key ${projectDetails.projectKey} was created by another node")
                     addCommentToIssue(issue, "Project with key ${projectDetails.projectKey} was created by another process")
                     return [success: false, error: "Project was created by another process"]
@@ -404,26 +404,23 @@ class ProjectCreationScript {
         def errors = []
         
         try {
-            // Try different ways to check if the result is valid
-            if (projectResult.hasProperty('valid')) {
-                isValid = projectResult.valid
-            } else if (projectResult.hasProperty('isValid')) {
-                isValid = projectResult.isValid()
+            // Updated logic to handle the project creation result more reliably.
+            // On success, 'createProject' returns a Project object. On failure, it returns a result object with errors.
+            if (projectResult instanceof Project) {
+                isValid = true
+                project = projectResult
+            } else if (projectResult.hasProperty('isValid') && !projectResult.isValid()) {
+                isValid = false
+                if (projectResult.hasProperty('errorCollection')) {
+                    errors = projectResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }
+                }
             } else if (projectResult.hasProperty('errorCollection') && projectResult.errorCollection.hasErrors()) {
                 isValid = false
-            } else {
-                // If we can't determine validity, assume it's valid if we have a project
-                isValid = projectResult.hasProperty('project') && projectResult.project != null
-            }
-            
-            // Get the project object
-            if (projectResult.hasProperty('project')) {
-                project = projectResult.project
-            }
-            
-            // Get errors if any
-            if (projectResult.hasProperty('errorCollection')) {
                 errors = projectResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }
+            } else if (projectResult.hasProperty('project') && projectResult.project != null) {
+                // Fallback for other result wrapper types
+                isValid = true
+                project = projectResult.project
             }
             
         } catch (Exception e) {
@@ -637,31 +634,36 @@ class ProjectCreationScript {
         }
     }
     
-    private boolean projectExists(String projectKey) {
+    private boolean projectExists(String projectKey, String projectName) {
         // Validate project key first
         if (!projectKey || projectKey.trim().isEmpty()) {
             log.error("Cannot check if project exists: project key is null or empty")
-            return false
+            return true // Treat as existing to prevent proceeding
         }
         
         try {
-            // Check cache first
+            // Check cache first for key
             def cache = getProjectCache()
             if (cache.get(projectKey)) {
                 return true
             }
             
-            // Check database
-            def project = projectManager.getProjectObjByKey(projectKey)
-            if (project) {
+            // Check database for key
+            if (projectManager.getProjectObjByKey(projectKey)) {
                 cache.put(projectKey, true)
+                return true
+            }
+            
+            // Check database for name
+            if (projectName && projectManager.getProjectObjByName(projectName)) {
+                log.warn("Project with name '${projectName}' already exists.")
                 return true
             }
             
             return false
         } catch (Exception e) {
             log.error("Error checking if project exists: ${projectKey}", e)
-            return false
+            return true // Fail safe
         }
     }
     
