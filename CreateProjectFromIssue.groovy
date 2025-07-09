@@ -88,7 +88,7 @@ class ProjectCreationScript {
         def fieldDetails = [:]
 
         requiredFields.each { fieldName ->
-            def field = customFieldManager.getCustomFieldObjectByName(fieldName)
+            def field = customFieldManager.getCustomFieldObjectsByName(fieldName)
             if (!field) {
                 missingFields.add(fieldName)
             } else {
@@ -353,12 +353,21 @@ class ProjectCreationScript {
         // Get the current user
         def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
         
+        // Get the project lead user object from the username string
+        def userManager = ComponentAccessor.getUserManager()
+        def leadUser = userManager.getUserByName(details.projectLead)
+
+        if (!leadUser) {
+            log.error("Project Lead user '${details.projectLead}' not found.")
+            return [success: false, error: "Project Lead user '${details.projectLead}' not found."]
+        }
+        
         // Create project creation data
         def builder = new ProjectCreationData.Builder()
             .withName(details.projectName)
             .withKey(details.projectKey)
             .withDescription(details.projectName?.take(255)) // Limit description length
-            .withLead(details.projectLead)
+            .withLead(leadUser)
             .withAssigneeType(AssigneeTypes.PROJECT_LEAD)
         
         // Set project type
