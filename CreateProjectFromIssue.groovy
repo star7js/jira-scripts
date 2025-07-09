@@ -11,17 +11,14 @@ import com.atlassian.jira.bc.project.ProjectCreationData
 import com.atlassian.jira.bc.project.ProjectService
 import com.atlassian.jira.issue.Issue
 import com.atlassian.jira.issue.CustomFieldManager
-import com.atlassian.jira.issue.fields.CustomField
 import com.atlassian.jira.issue.fields.option.Option
 import com.atlassian.jira.issue.comments.CommentManager
 import com.atlassian.jira.permission.PermissionSchemeManager
-import com.atlassian.sal.api.transaction.TransactionTemplate
 import com.atlassian.cache.CacheManager
 import com.atlassian.cache.Cache
 import com.atlassian.cache.CacheSettingsBuilder
 import com.atlassian.beehive.ClusterLockService
 import org.apache.log4j.Logger
-import org.apache.log4j.Level
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
 
