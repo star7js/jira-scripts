@@ -19,7 +19,7 @@ import com.atlassian.cache.Cache
 import com.atlassian.cache.CacheSettingsBuilder
 import com.atlassian.beehive.ClusterLockService
 import com.atlassian.jira.bc.projectroles.ProjectRoleService
-import com.atlassian.jira.bc.ServiceErrorCollection
+import com.atlassian.jira.util.SimpleErrorCollection
 import org.apache.log4j.Logger
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
@@ -498,7 +498,7 @@ class ProjectCreationScript {
 
         if (users) {
             log.warn("Adding users ${users*.name} to role '${roleName}' in project '${project.key}'")
-            def errorCollection = new ServiceErrorCollection()
+            def errorCollection = new SimpleErrorCollection()
             projectRoleService.addActorsToProjectRole(
                     users,
                     role,
@@ -523,7 +523,7 @@ class ProjectCreationScript {
         }
 
         log.warn("Adding group '${groupName}' to role '${roleName}' in project '${project.key}'")
-        def errorCollection = new ServiceErrorCollection()
+        def errorCollection = new SimpleErrorCollection()
         projectRoleService.addActorsToProjectRole(
                 [groupName],
                 role,
