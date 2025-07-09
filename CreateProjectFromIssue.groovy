@@ -485,20 +485,29 @@ class ProjectCreationScript {
             log.warn("Role not found: ${roleName}")
             return
         }
-        
-        def actors = usernames.collect { username ->
-            def user = ComponentAccessor.userManager.getUserByName(username)
+
+        def userKeys = usernames.collect { username ->
+            def user = ComponentAccessor.userManager.getUserByName(username?.trim())
             if (user) {
-                return ProjectRoleActor.USER_ROLE_ACTOR_TYPE + ":" + user.key
+                log.warn("Found user '${username}' for role '${roleName}'")
+                return user.key
+            } else {
+                log.warn("User '${username}' not found, cannot add to role '${roleName}'")
             }
             return null
         }.findAll { it != null }
-        
-        if (actors) {
-            projectRoleManager.updateProjectRoleActors(role, project, actors as Set, null)
+
+        if (userKeys) {
+            log.warn("Adding users with keys ${userKeys} to role '${roleName}' in project '${project.key}'")
+            projectRoleManager.addActorsToProjectRole(
+                userKeys,
+                role,
+                project,
+                ProjectRoleActor.USER_ROLE_ACTOR_TYPE
+            )
         }
     }
-    
+
     /**
      * Add a group to a project role
      */
@@ -508,9 +517,14 @@ class ProjectCreationScript {
             log.warn("Role not found: ${roleName}")
             return
         }
-        
-        def actors = [ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE + ":" + groupName] as Set
-        projectRoleManager.updateProjectRoleActors(role, project, actors, null)
+
+        log.warn("Adding group '${groupName}' to role '${roleName}' in project '${project.key}'")
+        projectRoleManager.addActorsToProjectRole(
+                [groupName],
+                role,
+                project,
+                ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE
+        )
     }
     
     /**
