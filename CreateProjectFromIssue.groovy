@@ -21,6 +21,7 @@ import com.atlassian.beehive.ClusterLockService
 import org.apache.log4j.Logger
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
+import java.util.Random
 
 /**
  * Jira Data Center compatible project creation script
@@ -38,7 +39,7 @@ class ProjectCreationScript {
     // Project configuration constants
     private static final String PROJECT_TYPE = "Project Type"
     private static final String PROJECT_LEAD = "Project Lead / Project Admin"
-    private static final String ADMIN_USERS = "List All Users That Should Have Service Desk Team Administrator Rights On The Project?"
+    private static final String ADMIN_USERS = "List All Users That Should Have Administrator Rights On The Project?"
     private static final String SERVICE_DESK_USERS = "List All Users That Should Have Service Desk Team Rights On The Project?"
     private static final String ALL_EMPLOYEES_VIEW = "Should All Employees Have The Ability To View This Project?"
     private static final String ALL_EMPLOYEES_EDIT = "Should All Employees Have The Ability To Create/Edit Issues In This Project?"
@@ -397,13 +398,44 @@ class ProjectCreationScript {
         
         def projectResult = projectService.createProject(validationResult)
         
-        if (!projectResult.valid) {
-            def errors = projectResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }.join(", ")
-            log.error("Project creation failed: ${errors}")
-            return [success: false, error: "Creation failed: ${errors}"]
+        // Handle different possible result structures for Jira 9.12
+        def isValid = false
+        def project = null
+        def errors = []
+        
+        try {
+            // Try different ways to check if the result is valid
+            if (projectResult.hasProperty('valid')) {
+                isValid = projectResult.valid
+            } else if (projectResult.hasProperty('isValid')) {
+                isValid = projectResult.isValid()
+            } else if (projectResult.hasProperty('errorCollection') && projectResult.errorCollection.hasErrors()) {
+                isValid = false
+            } else {
+                // If we can't determine validity, assume it's valid if we have a project
+                isValid = projectResult.hasProperty('project') && projectResult.project != null
+            }
+            
+            // Get the project object
+            if (projectResult.hasProperty('project')) {
+                project = projectResult.project
+            }
+            
+            // Get errors if any
+            if (projectResult.hasProperty('errorCollection')) {
+                errors = projectResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }
+            }
+            
+        } catch (Exception e) {
+            log.error("Error checking project creation result", e)
+            return [success: false, error: "Error checking project creation result: ${e.message}"]
         }
         
-        def project = projectResult.project
+        if (!isValid || !project) {
+            def errorMsg = errors ? errors.join(", ") : "Project creation failed"
+            log.error("Project creation failed: ${errorMsg}")
+            return [success: false, error: "Creation failed: ${errorMsg}"]
+        }
         
         // Configure project permissions
         configureProjectPermissions(project, details)
@@ -574,7 +606,7 @@ class ProjectCreationScript {
             baseKey = baseKey.take(4) // Take up to 4 characters for the base
 
             // Generate a hash of the issue key + timestamp for uniqueness
-            def uniqueString = "${issue.key}-${System.currentTimeMillis()}"
+            def uniqueString = "${issue.key}-${System.currentTimeMillis()}-${Thread.currentThread().getId()}-${Math.random()}"
             def messageDigest = MessageDigest.getInstance("MD5")
             def hashBytes = messageDigest.digest(uniqueString.getBytes())
             def hashString = hashBytes.encodeHex().toString().toUpperCase().replaceAll("[^A-Z0-9]", "")
@@ -588,7 +620,8 @@ class ProjectCreationScript {
             if (!projectKey || !projectKey.matches("[A-Z][A-Z0-9]{1,9}")) {
                 log.error("Invalid project key generated: '${projectKey}'. Falling back to default.")
                 def timestamp = System.currentTimeMillis().toString().takeLast(6)
-                projectKey = "PR${timestamp}"
+                def random = Math.abs(new Random().nextInt(999)).toString().padLeft(3, '0')
+                projectKey = "PR${timestamp}${random}".take(10)
             }
             
             log.warn("Generated project key: ${projectKey} for issue ${issue.key}")
