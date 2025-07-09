@@ -38,8 +38,8 @@ class ProjectCreationScript {
     // Project configuration constants
     private static final String PROJECT_TYPE = "Project Type"
     private static final String PROJECT_LEAD = "Project Lead / Project Admin"
-    private static final String ADMIN_USERS = "List All Users That Should Have Service Desk Team Administrator Rights On The Project"
-    private static final String SERVICE_DESK_USERS = "List All Users That Should Have Service Desk Team Rights On The Project"
+    private static final String ADMIN_USERS = "List All Users That Should Have Service Desk Team Administrator Rights On The Project?"
+    private static final String SERVICE_DESK_USERS = "List All Users That Should Have Service Desk Team Rights On The Project?"
     private static final String ALL_EMPLOYEES_VIEW = "Should All Employees Have The Ability To View This Project?"
     private static final String ALL_EMPLOYEES_EDIT = "Should All Employees Have The Ability To Create/Edit Issues In This Project?"
     private static final String USE_WITH_JIP = "Will This Project Be Used With JIP Or Jira Integration Plus"
@@ -90,7 +90,7 @@ class ProjectCreationScript {
                 missingFields.add(fieldName)
             } else {
                 fieldDetails[fieldName] = field
-                log.info("Found custom field: ${fieldName} (ID: ${field.id})")
+                log.warn("Found custom field: ${fieldName} (ID: ${field.id})")
             }
         }
 
@@ -134,7 +134,7 @@ class ProjectCreationScript {
                     return [success: false, error: assignResult.error]
                 }
                 
-                log.info("Successfully assigned permission scheme to project ${project.key}")
+                log.warn("Successfully assigned permission scheme to project ${project.key}")
                 return [success: true]
             } else {
                 log.error("Failed to copy permission scheme: ${schemeResult.error}")
@@ -161,7 +161,7 @@ class ProjectCreationScript {
      * Main entry point for creating a project from an issue
      */
     def createProjectFromIssue(Issue issue) {
-        log.info("Starting project creation from issue: ${issue?.key}")
+        log.warn("Starting project creation from issue: ${issue?.key}")
         
         try {
             // Validate issue first
@@ -179,7 +179,7 @@ class ProjectCreationScript {
             
             // Extract project details from issue
             def projectDetails = extractProjectDetails(issue)
-            log.info("Extracted project details: ${projectDetails}")
+            log.warn("Extracted project details: ${projectDetails}")
             
             if (!projectDetails) {
                 log.error("Failed to extract project details from issue ${issue.key}")
@@ -213,7 +213,7 @@ class ProjectCreationScript {
             
             // Log which node acquired the lock
             def nodeId = ComponentAccessor.getComponent(com.atlassian.jira.cluster.ClusterManager.class)?.getNodeId() ?: "single-node"
-            log.info("Acquired cluster lock: ${lockKey} on node ${nodeId}")
+            log.warn("Acquired cluster lock: ${lockKey} on node ${nodeId}")
             
             try {
                 // Double-check project doesn't exist after acquiring lock
@@ -229,7 +229,7 @@ class ProjectCreationScript {
                 if (result.success) {
                     // Clear cache after successful creation
                     clearProjectCache(projectDetails.projectKey)
-                    log.info("Successfully created project: ${projectDetails.projectKey}")
+                    log.warn("Successfully created project: ${projectDetails.projectKey}")
                     
                     // Copy and assign permissions scheme while still holding the lock
                     def permissionResult = copyAndAssignPermissionScheme(issue, result.project, projectDetails)
@@ -264,27 +264,40 @@ class ProjectCreationScript {
     private Map extractProjectDetails(Issue issue) {
         try {
             def details = [:]
-            
-            // Validate issue first
+
             if (!issue) {
                 log.error("Issue is null")
                 return null
             }
+
+            // Get the value from the "New Project Or Team Space Name" field to be used for both the project key and name.
+            def newProjectNameValue = getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD)
+            log.warn("Value from '${NEW_PROJECT_NAME_FIELD}': '${newProjectNameValue}'")
+
+            // Determine the base project name: Use the custom field, or fall back to the issue summary.
+            def baseProjectName = newProjectNameValue?.trim() ?: issue.summary?.trim()
             
-            // Get and sanitize project name
-            def rawProjectName = issue.summary?.trim()
-            if (!rawProjectName || rawProjectName.length() > 80) {
-                log.error("Invalid project name: empty or too long (${rawProjectName?.length()} chars)")
+            if (!baseProjectName) {
+                log.error("Could not determine a project name from custom field ('${NEW_PROJECT_NAME_FIELD}') or issue summary.")
                 return null
             }
             
-            details.projectName = rawProjectName.replaceAll(/[<>:"\/\\|?*]/, "") // Remove invalid chars
-            
-            // Get custom field values with improved error handling
-            def newProjectNameValue = getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD)
-            log.info("New Project Name field value: '${newProjectNameValue}'")
-            
+            // The project KEY is generated preferentially from the custom field value.
             details.projectKey = generateProjectKey(issue, newProjectNameValue)
+            
+            // Generate a UNIQUE project name by appending the key to the base name.
+            def sanitizedProjectName = baseProjectName.replaceAll(/[<>:"\/\\|?*]/, "")
+            def uniqueProjectName = "${sanitizedProjectName} (${details.projectKey})"
+            
+            // Enforce Jira's 80-character limit for project names.
+            if (uniqueProjectName.length() > 80) {
+                def truncateLength = 80 - " (${details.projectKey})".length()
+                sanitizedProjectName = sanitizedProjectName.take(truncateLength)
+                uniqueProjectName = "${sanitizedProjectName} (${details.projectKey})"
+            }
+            details.projectName = uniqueProjectName
+
+            // Get all other custom field values.
             details.projectType = getCustomFieldValue(issue, PROJECT_TYPE)
             details.projectLead = getCustomFieldValue(issue, PROJECT_LEAD)
             details.adminUsers = getCustomFieldValue(issue, ADMIN_USERS)
@@ -295,7 +308,7 @@ class ProjectCreationScript {
             details.opsecProgram = getCustomFieldValue(issue, OPSEC_PROGRAM)
             
             // Log all extracted values for debugging
-            log.info("Extracted values - Name: '${details.projectName}', Key: '${details.projectKey}', Type: '${details.projectType}', Lead: '${details.projectLead}'")
+            log.warn("Extracted values - Name: '${details.projectName}', Key: '${details.projectKey}', Type: '${details.projectType}', Lead: '${details.projectLead}'")
             
             // Validate required fields
             if (!details.projectName || !details.projectKey || !details.projectType || !details.projectLead) {
@@ -345,7 +358,7 @@ class ProjectCreationScript {
      * Create the project and configure permissions
      */
     private Map createProject(Map details) {
-        log.info("Creating project with key: ${details.projectKey}")
+        log.warn("Creating project with key: ${details.projectKey}")
         
         // Get the current user
         def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
@@ -402,7 +415,7 @@ class ProjectCreationScript {
      * Configure project permissions based on custom field values
      */
     private void configureProjectPermissions(Project project, Map details) {
-        log.info("Configuring permissions for project: ${project.key}")
+        log.warn("Configuring permissions for project: ${project.key}")
         
         try {
             // Add administrators
@@ -481,7 +494,7 @@ class ProjectCreationScript {
             
             def value = issue.getCustomFieldValue(customField)
             if (value == null) {
-                log.info("Custom field '${fieldName}' has null value for issue ${issue.key}")
+                log.warn("Custom field '${fieldName}' has null value for issue ${issue.key}")
                 return null
             }
             
@@ -529,7 +542,7 @@ class ProjectCreationScript {
                         word.trim() ? word[0].toUpperCase() : ""
                     }.findAll { it }.join("").replaceAll("[^A-Z]", "")
                 }
-                log.info("Generated base key from custom field: '${baseKey}' from '${newProjectName}'")
+                log.warn("Generated base key from custom field: '${baseKey}' from '${newProjectName}'")
             }
 
             // 2. Fallback to issue summary with better handling
@@ -543,13 +556,13 @@ class ProjectCreationScript {
                         }.findAll { it }.join("").replaceAll("[^A-Z]", "")
                     }
                 }
-                log.info("Generated base key from summary: '${baseKey}' from '${summary}'")
+                log.warn("Generated base key from summary: '${baseKey}' from '${summary}'")
             }
 
             // 3. Final fallback - use issue key
             if (!baseKey || baseKey.length() < 2) {
                 baseKey = issue.key?.replaceAll("[^A-Z]", "") ?: "PROJ"
-                log.info("Generated base key from issue key: '${baseKey}' from '${issue.key}'")
+                log.warn("Generated base key from issue key: '${baseKey}' from '${issue.key}'")
             }
             
             // Ensure we always have a valid starting point
@@ -578,7 +591,7 @@ class ProjectCreationScript {
                 projectKey = "PR${timestamp}"
             }
             
-            log.info("Generated project key: ${projectKey} for issue ${issue.key}")
+            log.warn("Generated project key: ${projectKey} for issue ${issue.key}")
             return projectKey
             
         } catch (Exception e) {
@@ -658,7 +671,7 @@ class ProjectCreationScript {
             
             def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
             commentManager.create(issue, currentUser, message, false)
-            log.info("Added comment to issue ${issue.key}: ${message}")
+            log.warn("Added comment to issue ${issue.key}: ${message}")
         } catch (Exception e) {
             log.error("Failed to add comment to issue", e)
         }
@@ -699,7 +712,7 @@ class CopyPermissionsScheme {
      * Execute permission scheme copy with proper error handling
      */
     def execute(String projectName, boolean allEmployeesCanEdit, boolean allEmployeesCanView, boolean isOpsec) {
-        log.info("Executing CopyPermissionsScheme for project: ${projectName}")
+        log.warn("Executing CopyPermissionsScheme for project: ${projectName}")
         
         try {
             // Validate parameters
@@ -717,13 +730,13 @@ class CopyPermissionsScheme {
             String sourceSchemeName = determineSourceScheme(isOpsec, allEmployeesCanEdit, allEmployeesCanView)
             String newSchemeName = generateSchemeName(projectName)
             
-            log.info("Source scheme: ${sourceSchemeName}, New scheme: ${newSchemeName}")
+            log.warn("Source scheme: ${sourceSchemeName}, New scheme: ${newSchemeName}")
             
             // Copy the permission scheme
             def result = copyPermissionScheme(sourceSchemeName, newSchemeName)
             
             if (result.success) {
-                log.info("Successfully created permission scheme: ${newSchemeName}")
+                log.warn("Successfully created permission scheme: ${newSchemeName}")
             }
             
             return result
@@ -784,7 +797,7 @@ class CopyPermissionsScheme {
             newScheme.setName(newSchemeName)
             permissionSchemeManager.updateScheme(newScheme)
             
-            log.info("Successfully copied scheme. New scheme instance created: ${newScheme.name}")
+            log.warn("Successfully copied scheme. New scheme instance created: ${newScheme.name}")
             
             return [success: true, scheme: newScheme]
             
@@ -815,7 +828,7 @@ class CopyPermissionsScheme {
             permissionSchemeManager.removeSchemesFromProject(project)
             permissionSchemeManager.addSchemeToProject(project, scheme)
             
-            log.info("Successfully assigned scheme '${schemeName}' to project '${projectKey}'")
+            log.warn("Successfully assigned scheme '${schemeName}' to project '${projectKey}'")
             return [success: true]
             
         } catch (Exception e) {
@@ -834,7 +847,7 @@ if (!issue) {
     return
 }
 
-log.info("Starting project creation script execution for issue: ${issue.key}")
+log.warn("Starting project creation script execution for issue: ${issue.key}")
 
 // Create and configure the project - all operations happen within the same lock
 def projectScript = new ProjectCreationScript()
@@ -845,7 +858,7 @@ def result = projectScript.createProjectFromIssue(issue)
 if (!result.success) {
     log.error("Project creation workflow failed: ${result.error}")
 } else {
-    log.info("Project creation workflow completed successfully")
+    log.warn("Project creation workflow completed successfully")
     if (result.permissionError) {
         log.warn("Project created but with permission issues: ${result.permissionError}")
     }
