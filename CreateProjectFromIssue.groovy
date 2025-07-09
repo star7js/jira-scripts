@@ -14,12 +14,11 @@ import com.atlassian.jira.issue.CustomFieldManager
 import com.atlassian.jira.issue.fields.option.Option
 import com.atlassian.jira.issue.comments.CommentManager
 import com.atlassian.jira.permission.PermissionSchemeManager
+import com.atlassian.jira.util.SimpleErrorCollection
 import com.atlassian.cache.CacheManager
 import com.atlassian.cache.Cache
 import com.atlassian.cache.CacheSettingsBuilder
 import com.atlassian.beehive.ClusterLockService
-import com.atlassian.jira.bc.projectroles.ProjectRoleService
-import com.atlassian.jira.util.SimpleErrorCollection
 import org.apache.log4j.Logger
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
@@ -74,7 +73,6 @@ class ProjectCreationScript {
     private ClusterLockService clusterLockService
     private CommentManager commentManager
     private PermissionSchemeManager permissionSchemeManager
-    private ProjectRoleService projectRoleService
     
     ProjectCreationScript() {
         initializeServices()
@@ -159,7 +157,6 @@ class ProjectCreationScript {
         this.clusterLockService = ComponentAccessor.getComponent(ClusterLockService.class)
         this.commentManager = ComponentAccessor.getCommentManager()
         this.permissionSchemeManager = ComponentAccessor.getPermissionSchemeManager()
-        this.projectRoleService = ComponentAccessor.getComponent(ProjectRoleService.class)
     }
     
     /**
@@ -245,8 +242,6 @@ class ProjectCreationScript {
                     
                     if (permissionResult.success) {
                         addCommentToIssue(issue, "Successfully created project: ${projectLink} with permissions configured.")
-                        // Now that project exists and permissions are set, configure roles
-                        configureProjectPermissions(result.project, projectDetails)
                     } else {
                         addCommentToIssue(issue, "Project created: ${projectLink}, but permission scheme assignment failed: ${permissionResult.error}")
                         // Update the result to indicate partial success
@@ -321,6 +316,9 @@ class ProjectCreationScript {
             
             // Log all extracted values for debugging
             log.warn("Extracted values - Name: '${details.projectName}', Key: '${details.projectKey}', Type: '${details.projectType}', Lead: '${details.projectLead}'")
+            log.warn("Role assignments - Admin Users: '${details.adminUsers}', Service Desk Users: '${details.serviceDeskUsers}'")
+            log.warn("Employee permissions - View: '${details.allEmployeesView}', Edit: '${details.allEmployeesEdit}'")
+            log.warn("Other settings - JIP: '${details.useWithJIP}', OPSEC: '${details.opsecProgram}'")
             
             // Validate required fields
             if (!details.projectName || !details.projectKey || !details.projectType || !details.projectLead) {
@@ -445,6 +443,8 @@ class ProjectCreationScript {
             return [success: false, error: "Creation failed: ${errorMsg}"]
         }
         
+        log.warn("Project created successfully, now configuring permissions for: ${project.key}")
+        
         // Configure project permissions
         configureProjectPermissions(project, details)
         
@@ -452,87 +452,162 @@ class ProjectCreationScript {
     }
     
     /**
-     * Configure project permissions based on custom field values
+     * Configure project permissions based on custom field values - REVISED VERSION
      */
     private void configureProjectPermissions(Project project, Map details) {
         log.warn("Configuring permissions for project: ${project.key}")
         
         try {
-            // Add administrators
-            if (details.adminUsers) {
-                addUsersToRole(project, ROLE_ADMINISTRATORS, parseUserList(details.adminUsers))
+            // Add administrators - with better validation
+            if (details.adminUsers?.trim()) {
+                def adminUsersList = parseUserList(details.adminUsers)
+                log.warn("Adding admin users: ${adminUsersList}")
+                addUsersToRole(project, ROLE_ADMINISTRATORS, adminUsersList)
+            } else {
+                log.warn("No admin users to add for project ${project.key}")
             }
             
-            // Add service desk users
-            if (details.serviceDeskUsers) {
-                addUsersToRole(project, ROLE_SERVICE_DESK_TEAM, parseUserList(details.serviceDeskUsers))
+            // Add service desk users - with better validation
+            if (details.serviceDeskUsers?.trim()) {
+                def serviceDeskUsersList = parseUserList(details.serviceDeskUsers)
+                log.warn("Adding service desk users: ${serviceDeskUsersList}")
+                addUsersToRole(project, ROLE_SERVICE_DESK_TEAM, serviceDeskUsersList)
+            } else {
+                log.warn("No service desk users to add for project ${project.key}")
             }
             
             // Configure all employees permissions
             if (details.allEmployeesView == "yes") {
+                log.warn("Adding all employees to Users role")
                 addGroupToRole(project, ALL_EMPLOYEES_GROUP, ROLE_USERS)
             }
             
             if (details.allEmployeesEdit == "yes") {
+                log.warn("Adding all employees to Developers role")
                 addGroupToRole(project, ALL_EMPLOYEES_GROUP, ROLE_DEVELOPERS)
             }
             
+            // Log final role configuration for debugging
+            logProjectRoles(project)
+            
         } catch (Exception e) {
-            log.error("Error configuring project permissions", e)
+            log.error("Error configuring project permissions for ${project.key}", e)
+            throw e // Re-throw to ensure the error is visible
         }
     }
     
     /**
-     * Add users to a project role
+     * Improved addUsersToRole method with better error handling - REVISED VERSION
      */
     private void addUsersToRole(Project project, String roleName, List<String> usernames) {
-        def role = projectRoleManager.getProjectRole(roleName)
-        if (!role) {
-            log.warn("Role not found: ${roleName}")
-            return
-        }
-
-        def users = usernames.collect { username ->
-            ComponentAccessor.getUserManager().getUserByName(username?.trim())
-        }.findAll { it != null }
-
-        if (users) {
-            log.warn("Adding users ${users*.name} to role '${roleName}' in project '${project.key}'")
-            def errorCollection = new SimpleErrorCollection()
-            projectRoleService.addActorsToProjectRole(
-                    users,
-                    role,
-                    project,
-                    ProjectRoleActor.USER_ROLE_ACTOR_TYPE,
-                    errorCollection
-            )
-            if (errorCollection.hasAnyErrors()) {
-                log.error("Failed to add users to role: ${errorCollection.errorMessages}")
+        try {
+            def role = projectRoleManager.getProjectRole(roleName)
+            if (!role) {
+                log.error("Role not found: ${roleName}")
+                return
             }
+            
+            log.warn("Adding ${usernames.size()} users to role ${roleName} in project ${project.key}")
+            
+            def validUserKeys = []
+            def invalidUsers = []
+            
+            usernames.each { username ->
+                if (!username?.trim()) {
+                    return // Skip empty usernames
+                }
+                
+                def user = ComponentAccessor.userManager.getUserByName(username.trim())
+                if (user) {
+                    validUserKeys.add(user.key) // We need user keys for addActorsToProjectRole
+                    log.warn("Found user: ${username} (key: ${user.key})")
+                } else {
+                    invalidUsers.add(username)
+                    log.error("User not found: ${username}")
+                }
+            }
+            
+            if (invalidUsers) {
+                log.error("Invalid users for role ${roleName}: ${invalidUsers}")
+            }
+            
+            if (validUserKeys) {
+                // Use the additive method to avoid overwriting existing role actors
+                def errorCollection = new SimpleErrorCollection()
+                projectRoleManager.addActorsToProjectRole(validUserKeys, role, project, ProjectRoleActor.USER_ROLE_ACTOR_TYPE, errorCollection)
+                
+                if (errorCollection.hasAnyErrors()) {
+                    log.error("Error adding users to role ${roleName}: ${errorCollection.errors}")
+                } else {
+                    log.warn("Successfully added ${validUserKeys.size()} users to role ${roleName}")
+                }
+            } else {
+                log.warn("No valid users to add to role ${roleName}")
+            }
+            
+        } catch (Exception e) {
+            log.error("Error adding users to role ${roleName}", e)
+            throw e
         }
     }
-
+    
     /**
-     * Add a group to a project role
+     * Improved addGroupToRole method - REVISED VERSION
      */
     private void addGroupToRole(Project project, String groupName, String roleName) {
-        def role = projectRoleManager.getProjectRole(roleName)
-        if (!role) {
-            log.warn("Role not found: ${roleName}")
-            return
+        try {
+            def role = projectRoleManager.getProjectRole(roleName)
+            if (!role) {
+                log.error("Role not found: ${roleName}")
+                return
+            }
+            
+            // Check if group exists
+            def groupManager = ComponentAccessor.getGroupManager()
+            if (!groupManager.getGroup(groupName)) {
+                log.error("Group not found: ${groupName}")
+                return
+            }
+            
+            // Use the additive method to avoid overwriting existing role actors
+            def errorCollection = new SimpleErrorCollection()
+            projectRoleManager.addActorsToProjectRole([groupName], role, project, ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE, errorCollection)
+            
+            if (errorCollection.hasAnyErrors()) {
+                log.error("Error adding group ${groupName} to role ${roleName}: ${errorCollection.errors}")
+            } else {
+                log.warn("Successfully added group ${groupName} to role ${roleName}")
+            }
+            
+        } catch (Exception e) {
+            log.error("Error adding group ${groupName} to role ${roleName}", e)
+            throw e
         }
-
-        log.warn("Adding group '${groupName}' to role '${roleName}' in project '${project.key}'")
-        def errorCollection = new SimpleErrorCollection()
-        projectRoleService.addActorsToProjectRole(
-                [groupName],
-                role,
-                project,
-                ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE,
-                errorCollection
-        )
-        if (errorCollection.hasAnyErrors()) {
-            log.error("Failed to add group to role: ${errorCollection.errorMessages}")
+    }
+    
+    /**
+     * New method to log current project roles for debugging - NEW METHOD
+     */
+    private void logProjectRoles(Project project) {
+        try {
+            def roles = [ROLE_ADMINISTRATORS, ROLE_SERVICE_DESK_TEAM, ROLE_USERS, ROLE_DEVELOPERS]
+            
+            roles.each { roleName ->
+                def role = projectRoleManager.getProjectRole(roleName)
+                if (role) {
+                    def actors = projectRoleManager.getProjectRoleActors(role, project)
+                    def users = actors.getUsers().collect { it.name }
+                    def groups = actors.getRoleActors().findAll { 
+                        it.type == ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE 
+                    }.collect { it.parameter }
+                    
+                    log.warn("Role ${roleName}: Users=${users}, Groups=${groups}")
+                } else {
+                    log.warn("Role ${roleName}: NOT FOUND")
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error logging project roles", e)
         }
     }
     
@@ -569,8 +644,8 @@ class ProjectCreationScript {
                         return item.toString()
                     }
                 }.join(",")
-            } else if (item instanceof ApplicationUser) {
-                return item.getUsername()
+            } else if (value instanceof ApplicationUser) {
+                return value.getUsername()
             } else {
                 return value.toString()?.trim()
             }
@@ -705,14 +780,19 @@ class ProjectCreationScript {
         }
     }
     
+    /**
+     * Improved parseUserList method - REVISED VERSION
+     */
     private List<String> parseUserList(String userList) {
         if (!userList?.trim()) {
             return []
         }
         
-        return userList.split("[,;\\s]+")
+        // Handle multiple delimiters and clean up the list
+        return userList.split(/[,;|\n\r]+/)
             .collect { it.trim() }
-            .findAll { it }
+            .findAll { it && !it.isEmpty() }
+            .unique()
     }
     
     private Cache<String, Boolean> getProjectCache() {
