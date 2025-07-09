@@ -241,6 +241,8 @@ class ProjectCreationScript {
                     
                     if (permissionResult.success) {
                         addCommentToIssue(issue, "Successfully created project: ${projectLink} with permissions configured.")
+                        // Now that project exists and permissions are set, configure roles
+                        configureProjectPermissions(result.project, projectDetails)
                     } else {
                         addCommentToIssue(issue, "Project created: ${projectLink}, but permission scheme assignment failed: ${permissionResult.error}")
                         // Update the result to indicate partial success
@@ -440,7 +442,7 @@ class ProjectCreationScript {
         }
         
         // Configure project permissions
-        configureProjectPermissions(project, details)
+        // configureProjectPermissions(project, details)
         
         return [success: true, project: project]
     }
