@@ -234,10 +234,15 @@ class ProjectCreationScript {
                     
                     // Copy and assign permissions scheme while still holding the lock
                     def permissionResult = copyAndAssignPermissionScheme(issue, result.project, projectDetails)
+                    
+                    // Get base URL for the hyperlink
+                    def baseUrl = ComponentAccessor.applicationProperties.getString("jira.baseurl")
+                    def projectLink = "[${projectDetails.projectKey}|${baseUrl}/projects/${projectDetails.projectKey}]"
+                    
                     if (permissionResult.success) {
-                        addCommentToIssue(issue, "Successfully created project: ${projectDetails.projectKey} with permissions configured")
+                        addCommentToIssue(issue, "Successfully created project: ${projectLink} with permissions configured.")
                     } else {
-                        addCommentToIssue(issue, "Project created: ${projectDetails.projectKey}, but permission scheme assignment failed: ${permissionResult.error}")
+                        addCommentToIssue(issue, "Project created: ${projectLink}, but permission scheme assignment failed: ${permissionResult.error}")
                         // Update the result to indicate partial success
                         result.permissionError = permissionResult.error
                     }
@@ -600,7 +605,17 @@ class ProjectCreationScript {
                 log.warn("Using default base key: ${baseKey}")
             }
 
-            baseKey = baseKey.take(4) // Take up to 4 characters for the base
+            baseKey = baseKey.take(10) // Take up to 10 characters for the base key
+
+            // Check if this simple, user-friendly key already exists.
+            if (!projectExists(baseKey, null)) {
+                log.warn("Using user-friendly project key: ${baseKey}")
+                return baseKey
+            }
+
+            // If it exists, generate a unique key by adding a hash.
+            log.warn("Project key '${baseKey}' already exists. Generating a unique key.")
+            def keyForHashing = baseKey.take(4) // Shorten to make room for the hash suffix
 
             // Generate a hash of the issue key + timestamp for uniqueness
             def uniqueString = "${issue.key}-${System.currentTimeMillis()}-${Thread.currentThread().getId()}-${Math.random()}"
@@ -609,9 +624,9 @@ class ProjectCreationScript {
             def hashString = hashBytes.encodeHex().toString().toUpperCase().replaceAll("[^A-Z0-9]", "")
 
             // Combine base key with hash suffix (ensure total length 2-10 chars)
-            def maxSuffixLength = Math.max(0, 10 - baseKey.length())
+            def maxSuffixLength = Math.max(0, 10 - keyForHashing.length())
             def suffix = hashString.take(maxSuffixLength)
-            def projectKey = "${baseKey}${suffix}".take(10)
+            def projectKey = "${keyForHashing}${suffix}".take(10)
 
             // Final validation and fallback to a completely safe key
             if (!projectKey || !projectKey.matches("[A-Z][A-Z0-9]{1,9}")) {
@@ -621,7 +636,7 @@ class ProjectCreationScript {
                 projectKey = "PR${timestamp}${random}".take(10)
             }
             
-            log.warn("Generated project key: ${projectKey} for issue ${issue.key}")
+            log.warn("Generated unique project key: ${projectKey} for issue ${issue.key}")
             return projectKey
             
         } catch (Exception e) {
