@@ -1,3 +1,5 @@
+// Updated CreateProjectFromIssue.groovy
+
 package com.company.jira.scripts
 
 import com.atlassian.jira.component.ComponentAccessor
@@ -23,6 +25,17 @@ import org.apache.log4j.Logger
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
 import java.util.Random
+import com.atlassian.jira.config.NotificationSchemeManager
+import com.atlassian.jira.notification.NotificationSchemeManager
+import com.atlassian.jira.issue.fields.config.manager.PrioritySchemeManager
+import com.atlassian.jira.issue.fields.layout.field.FieldLayoutManager
+import com.atlassian.jira.issue.fields.layout.field.EditableDefaultFieldLayout
+import com.atlassian.jira.issue.fields.layout.field.EditableFieldLayout
+import com.atlassian.jira.issue.fields.layout.field.FieldLayoutScheme
+import com.atlassian.jira.issue.fields.layout.field.FieldLayoutSchemeEntity
+import com.atlassian.jira.issue.fields.layout.field.FieldLayoutSchemeImpl
+import com.atlassian.jira.issue.fields.layout.field.FieldLayoutSchemeEntityImpl
+import com.google.common.collect.ImmutableList
 
 /**
  * Jira Data Center compatible project creation script
@@ -36,6 +49,8 @@ class ProjectCreationScript {
     private static final String LOCK_PREFIX = "project-creation-lock-"
     private static final int LOCK_TIMEOUT_SECONDS = 30
     private static final int MAX_RETRIES = 2  // Reduced to minimize blocking
+    private static final long PERMISSION_REF_SCHEME_ID = 10207L
+    private static final long NOTIFICATION_REF_SCHEME_ID = 12300L
     
     // Project configuration constants
     private static final String PROJECT_TYPE = "Project Type"
@@ -236,6 +251,32 @@ class ProjectCreationScript {
                     // Copy and assign permissions scheme while still holding the lock
                     def permissionResult = copyAndAssignPermissionScheme(issue, result.project, projectDetails)
                     
+                    if (permissionResult.success) {
+                        def noSpaceProjectName = projectDetails.projectName.replaceAll("\\s+", "").toLowerCase()
+                        
+                        // Notification scheme setup
+                        def notificationResult = setupNotificationScheme(result.project, noSpaceProjectName)
+                        if (!notificationResult.success) {
+                            log.warn("Notification scheme setup failed: ${notificationResult.error}")
+                            result.notificationError = notificationResult.error
+                            addCommentToIssue(issue, "Project created, but notification scheme failed: ${notificationResult.error}")
+                        }
+                        
+                        def priorityResult = setupPriorityScheme(result.project, noSpaceProjectName)
+                        if (!priorityResult.success) {
+                            log.warn("Priority scheme setup failed: ${priorityResult.error}")
+                            result.priorityError = priorityResult.error
+                            addCommentToIssue(issue, "Project created, but priority scheme failed: ${priorityResult.error}")
+                        }
+                        
+                        def fieldLayoutResult = setupFieldLayoutScheme(result.project, noSpaceProjectName)
+                        if (!fieldLayoutResult.success) {
+                            log.warn("Field layout scheme setup failed: ${fieldLayoutResult.error}")
+                            result.fieldLayoutError = fieldLayoutResult.error
+                            addCommentToIssue(issue, "Project created, but field layout scheme failed: ${fieldLayoutResult.error}")
+                        }
+                    }
+                    
                     // Get base URL for the hyperlink
                     def baseUrl = ComponentAccessor.applicationProperties.getString("jira.baseurl")
                     def projectLink = "[${projectDetails.projectKey}|${baseUrl}/projects/${projectDetails.projectKey}]"
@@ -261,6 +302,96 @@ class ProjectCreationScript {
             log.error("Error creating project from issue ${issue?.key}", e)
             addCommentToIssue(issue, "Failed to create project: ${e.message}")
             return [success: false, error: "Unexpected error: ${e.message}"]
+        }
+    }
+    
+    private Map setupNotificationScheme(Project project, String noSpaceProjectName) {
+        try {
+            def notificationSchemeManager = ComponentAccessor.getNotificationSchemeManager()
+            def notificationSchemeName = "app-jira-" + noSpaceProjectName + "-notification-scheme"
+            def refScheme = notificationSchemeManager.getSchemeObject(NOTIFICATION_REF_SCHEME_ID)
+            if (!refScheme) return [success: false, error: "Ref notification scheme not found"]
+            
+            def newScheme = notificationSchemeManager.getSchemeObject(notificationSchemeName)
+            if (!newScheme) {
+                newScheme = notificationSchemeManager.copyScheme(refScheme)
+                newScheme.setName(notificationSchemeName)
+                notificationSchemeManager.updateScheme(newScheme)
+            }
+            
+            // Assign
+            notificationSchemeManager.removeSchemesFromProject(project)
+            notificationSchemeManager.addSchemeToProject(project, newScheme)
+            
+            return [success: true]
+        } catch (Exception e) {
+            log.error("Error setting notification scheme", e)
+            return [success: false, error: e.message]
+        }
+    }
+
+    private Map setupPriorityScheme(Project project, String noSpaceProjectName) {
+        try {
+            def prioritySchemeManager = ComponentAccessor.getComponent(PrioritySchemeManager.class)
+            def prioritySchemeName = "app-jira-" + noSpaceProjectName + "-priority-scheme"
+            
+            def fieldConfigScheme = prioritySchemeManager.getAllSchemes().find { it.name == prioritySchemeName }
+            if (!fieldConfigScheme) {
+                fieldConfigScheme = prioritySchemeManager.createWithDefaultMapping(prioritySchemeName, "Project-specific priorities", ImmutableList.of("2", "3", "4"))
+                def fieldConfig = prioritySchemeManager.getFieldConfigForDefaultMapping(fieldConfigScheme)
+                prioritySchemeManager.setDefaultOption(fieldConfig, "3")
+            }
+            
+            // Assign if not already
+            if (prioritySchemeManager.getSchemeFor(project)?.name != prioritySchemeName) {
+                prioritySchemeManager.removeSchemesFromProject(project)
+                prioritySchemeManager.assignToProject(fieldConfigScheme, project)
+            }
+            
+            return [success: true]
+        } catch (Exception e) {
+            log.error("Error setting priority scheme", e)
+            return [success: false, error: e.message]
+        }
+    }
+
+    private Map setupFieldLayoutScheme(Project project, String noSpaceProjectName) {
+        try {
+            def fieldLayoutManager = ComponentAccessor.getFieldLayoutManager()
+            def fieldConfigSchemeName = "app-jira-" + noSpaceProjectName + "-field-config-scheme"
+            
+            // Create editable layout if not exists
+            def editableFieldLayout = fieldLayoutManager.getEditableFieldLayouts().find { it.name == fieldConfigSchemeName }
+            if (!editableFieldLayout) {
+                def defaultFieldLayout = fieldLayoutManager.getEditableDefaultFieldLayout()
+                def newEditable = new EditableFieldLayoutImpl(null, defaultFieldLayout.getFieldLayoutItems())
+                newEditable.setName(fieldConfigSchemeName)
+                newEditable.setDescription(fieldConfigSchemeName)
+                editableFieldLayout = fieldLayoutManager.storeAndReturnEditableFieldLayout(newEditable)
+            }
+            
+            // Create scheme if not exists
+            def fieldLayoutScheme = fieldLayoutManager.getFieldLayoutSchemes().find { it.name == fieldConfigSchemeName }
+            if (!fieldLayoutScheme) {
+                fieldLayoutScheme = new FieldLayoutSchemeImpl(fieldLayoutManager, null)
+                fieldLayoutScheme.setName(fieldConfigSchemeName)
+                fieldLayoutScheme.setDescription(fieldConfigSchemeName)
+                fieldLayoutScheme.store()
+                
+                def entity = fieldLayoutManager.createFieldLayoutSchemeEntity(fieldLayoutScheme, null, editableFieldLayout.id)
+                fieldLayoutManager.updateFieldLayoutSchemeEntity(entity)
+                fieldLayoutManager.updateFieldLayoutScheme(fieldLayoutScheme)
+            }
+            
+            // Assign if not already
+            if (fieldLayoutManager.getFieldLayoutSchemeForProject(project)?.name != fieldConfigSchemeName) {
+                fieldLayoutManager.addSchemeToProject(project, fieldLayoutScheme.id)
+            }
+            
+            return [success: true]
+        } catch (Exception e) {
+            log.error("Error setting field layout scheme", e)
+            return [success: false, error: e.message]
         }
     }
     
