@@ -1,0 +1,39 @@
+version: '3'
+services:
+  jira:
+    build: ./jira
+    container_name: jira_test_env
+    volumes:
+      - jiradata:/var/atlassian/application-data/jira
+      # Mount your local scripts into the Jira scripts directory
+      - ../:/var/atlassian/application-data/jira/scripts
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    environment:
+      - 'JIRA_DATABASE_URL=postgresql://jirauser:jipassword@postgres:5432/jiradb'
+      - 'JIRA_DB_TYPE=postgres72'
+      - 'JIRA_DB_USER=jirauser'
+      - 'JIRA_DB_PASSWORD=jipassword'
+      - 'JVM_MINIMUM_MEMORY=1024m'
+      - 'JVM_MAXIMUM_MEMORY=2048m'
+
+  postgres:
+    image: postgres:10.18
+    container_name: jira_db
+    volumes:
+      - postgresqldata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    environment:
+      - 'POSTGRES_USER=jirauser'
+      - 'POSTGRES_PASSWORD=jipassword'
+      - 'POSTGRES_DB=jiradb'
+      - 'POSTGRES_ENCODING=UNICODE'
+      - 'POSTGRES_COLLATE=C'
+      - 'POSTGRES_COLLATE_TYPE=C'
+
+volumes:
+  jiradata:
+  postgresqldata: 

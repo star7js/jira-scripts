@@ -1,0 +1,2 @@
+# Ignore the Jira backup file as it can be large and is generated.
+jira-backup.zip 
