@@ -69,7 +69,7 @@ This project uses GitHub Actions for automated quality assurance:
 
 | Script | Description | Use Case |
 |--------|-------------|----------|
-| `CreateConfluenceSpaceTest.groovy` | Standalone Confluence space creation with Application Links | Testing and development |
+
 | `CreateConfluenceSpaceFromIssue.groovy` | Workflow post-function for space creation from Jira issues using Application Links | Production workflow automation |
 
 ### REST API Utilities
@@ -144,7 +144,7 @@ def violationProjectKey = 'AUDIT'
 ## 🚨 Important Notes
 
 1. **Backup**: Always backup your Jira instance before running scripts
-2. **Testing**: Test scripts in a development environment first
+2. **Environment**: Test scripts in a development environment first
 3. **Permissions**: Ensure you have necessary permissions for operations
 4. **Logging**: Check logs for detailed operation information
 

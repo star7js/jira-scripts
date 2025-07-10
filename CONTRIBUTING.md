@@ -65,11 +65,11 @@ try {
 - **Constants**: UPPER_SNAKE_CASE (e.g., `MAX_RETRY_ATTEMPTS`)
 - **Loggers**: Use package-style naming (e.g., `com.example.ScriptName`)
 
-### 3. Testing Your Script
+### 3. Development Guidelines
 
 Before submitting:
 
-1. **Test in Development**: Run in a development Jira instance first
+1. **Development Environment**: Run in a development Jira instance first
 2. **Error Scenarios**: Test with invalid inputs and edge cases
 3. **Permissions**: Verify script works with appropriate permission levels
 4. **Logging**: Check that logs provide useful debugging information
@@ -148,7 +148,7 @@ Brief description of what this script does and why it's useful.
 - [ ] Documentation included
 - [ ] Tested in development environment
 
-## Testing
+## Development
 - [ ] Tested with valid inputs
 - [ ] Tested with invalid inputs
 - [ ] Tested error scenarios
@@ -165,7 +165,7 @@ If applicable, include screenshots or example outputs.
 
 1. **Automated Checks**: Ensure all automated checks pass
 2. **Code Review**: At least one maintainer will review your code
-3. **Testing**: Your script may be tested in a review environment
+3. **Review**: Your script may be tested in a review environment
 4. **Feedback**: Address any feedback or requested changes
 5. **Merge**: Once approved, your contribution will be merged
 

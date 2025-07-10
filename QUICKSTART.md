@@ -20,7 +20,7 @@ Get up and running with Jira Scripts in 5 minutes! 🚀
 - Start with `AuditPermissions.groovy` - Check permission violations
 
 **For Confluence Integration:**
-- Start with `CreateConfluenceSpaceTest.groovy` - Create a test space
+- Start with `CreateConfluenceSpaceFromIssue.groovy` - Create a space from Jira issues
 
 ### 3. Configure and Run (2 minutes)
 
@@ -70,12 +70,10 @@ def violationProjectKey = 'AUDIT'
 
 #### ...create a Confluence space
 ```groovy
-// Use CreateConfluenceSpaceTest.groovy
-def testValues = [
-    spaceName: "My Team Space",
-    spaceKey: "TEAM",
-    isOpsec: false
-]
+// Use CreateConfluenceSpaceFromIssue.groovy
+def spaceName = "My Team Space"
+def spaceKey = "TEAM"
+def isOpsec = false
 ```
 
 ## 🔧 Configuration Cheat Sheet

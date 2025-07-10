@@ -169,8 +169,5 @@ site/
 target/
 build/
 
-# Test files
-test-results/
-coverage/
-.coverage
+
 
