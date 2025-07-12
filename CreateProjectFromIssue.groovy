@@ -1,33 +1,44 @@
-package com
-
+//file:noinspection DuplicatedCode
 import com.atlassian.beehive.ClusterLockService
 import com.atlassian.cache.Cache
 import com.atlassian.cache.CacheManager
 import com.atlassian.cache.CacheSettingsBuilder
 import com.atlassian.jira.bc.project.ProjectCreationData
 import com.atlassian.jira.bc.project.ProjectService
+import com.atlassian.jira.bc.projectroles.ProjectRoleService
 import com.atlassian.jira.cluster.ClusterManager
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.issue.CustomFieldManager
 import com.atlassian.jira.issue.Issue
 import com.atlassian.jira.issue.comments.CommentManager
+import com.atlassian.jira.issue.customfields.option.Option
+import com.atlassian.jira.issue.fields.CustomField
 import com.atlassian.jira.issue.fields.config.manager.PrioritySchemeManager
 import com.atlassian.jira.issue.fields.layout.field.EditableFieldLayoutImpl
+import com.atlassian.jira.issue.fields.renderer.IssueRenderContext
+import com.atlassian.jira.issue.issuetype.IssueType
+import com.atlassian.jira.issue.priority.Priority
+import com.atlassian.jira.issue.resolution.Resolution
+import com.atlassian.jira.issue.status.Status
 import com.atlassian.jira.permission.PermissionSchemeManager
+import com.atlassian.jira.permission.PermissionScheme
 import com.atlassian.jira.project.AssigneeTypes
 import com.atlassian.jira.project.Project
 import com.atlassian.jira.project.ProjectManager
+import com.atlassian.jira.project.ProjectCategory
+import com.atlassian.jira.project.UpdateProjectParameters
+import com.atlassian.jira.scheme.SchemeEntity
 import com.atlassian.jira.security.roles.ProjectRoleActor
 import com.atlassian.jira.security.roles.ProjectRoleManager
 import com.atlassian.jira.user.ApplicationUser
 import com.atlassian.jira.util.SimpleErrorCollection
 import com.google.common.collect.ImmutableList
 import org.apache.log4j.Logger
+import org.ofbiz.core.entity.GenericValue
 
 import java.security.MessageDigest
+import java.sql.Timestamp
 import java.util.concurrent.TimeUnit
-
-import com.atlassian.jira.issue.customfields.option.Option
 
 /**
  * Jira Data Center compatible project creation script
@@ -40,7 +51,7 @@ class ProjectCreationScript {
     private static final String CACHE_NAME = "project-creation-cache"
     private static final String LOCK_PREFIX = "project-creation-lock-"
     private static final int LOCK_TIMEOUT_SECONDS = 30
-    private static final int MAX_RETRIES = 2  // Reduced to minimize blocking
+    private static final int MAX_RETRIES = 1  // Reduced further based on suggestions
     private static final long PERMISSION_REF_SCHEME_ID = 10207L
     private static final long NOTIFICATION_REF_SCHEME_ID = 12300L
 
@@ -51,9 +62,10 @@ class ProjectCreationScript {
     private static final String SERVICE_DESK_USERS = "List All Users That Should Have Service Desk Team Rights On The Project?"
     private static final String ALL_EMPLOYEES_VIEW = "Should All Employees Have The Ability To View This Project?"
     private static final String ALL_EMPLOYEES_EDIT = "Should All Employees Have The Ability To Create/Edit Issues In This Project?"
-    private static final String USE_WITH_JIP = "Will This Project Be Used With JIP Or Jira Integration Plus"
+    private static final String USE_WITH_JIP = "Will This Project Be Used With JIP Or Jira Integration Plus?"
     private static final String OPSEC_PROGRAM = "OPSEC Program to onboard to"
     private static final String NEW_PROJECT_NAME_FIELD = "New Project Or Team Space Name"
+    private static final String PROJECT_CATEGORY = "Category"  // This is a custom field that is used to categorize the project
     private static final String ALL_EMPLOYEES_GROUP = "jira-users" // Default group for all employees
 
     // Role Names
@@ -63,12 +75,21 @@ class ProjectCreationScript {
     private static final String ROLE_DEVELOPERS = "Developers"
 
     private static final Map<String, String> PROJECT_TYPE_MAPPING = [
-            "Software - Scrum - (Most Popular Choice)": "software",
+            "Software - Kanban - (Most Popular Choice)": "software",
             "Software - Scrum - (Good For Sprints)"   : "software",
             "Business - Project Management"           : "business",
             "Business - Task Management"              : "business",
             "Service Management - IT"                 : "service_desk",
             "Service Management - General"            : "service_desk"
+    ]
+
+    private static final Map<String, String> PROJECT_TEMPLATE_MAPPING = [
+            "Software - Kanban - (Most Popular Choice)": "com.pyxis.greenhopper.jira:gh-kanban-template",
+            "Software - Scrum - (Good For Sprints)": "com.pyxis.greenhopper.jira:gh-scrum-template",
+            "Business - Project Management": "com.atlassian.jira-core-project-templates:jira-core-simplified-project-management",
+            "Business - Task Management": "com.atlassian.jira-core-project-templates:jira-core-simplified-task-tracking",
+            "Service Management - IT": "com.atlassian.servicedesk:simplified-it-service-desk",
+            "Service Management - General": "com.atlassian.servicedesk:simplified-general-service-desk"
     ]
 
     // Services - will be initialized once
@@ -80,21 +101,31 @@ class ProjectCreationScript {
     private ClusterLockService clusterLockService
     private CommentManager commentManager
     private PermissionSchemeManager permissionSchemeManager
+    private ProjectRoleService projectRoleService
 
-    ProjectCreationScript() {
+    private boolean isTestMode = false // Set to true for Script Console testing
+
+    // Constructor to set test mode if needed
+    ProjectCreationScript(boolean testMode = false) {
+        this.isTestMode = testMode
         initializeServices()
     }
 
     /**
      * Validate required custom fields exist before processing
      */
-    private Map validateCustomFields() {
-        def requiredFields = [NEW_PROJECT_NAME_FIELD, PROJECT_TYPE, PROJECT_LEAD]
+    private Map<String, Object> validateCustomFields() {
+        if (isTestMode) {
+            log.warn("Test mode: Skipping custom field validation")
+            return [success: true, fields: [:]] // Mock success
+        }
+        def requiredFields = [NEW_PROJECT_NAME_FIELD, PROJECT_TYPE, PROJECT_LEAD, PROJECT_CATEGORY]
         def missingFields = []
         def fieldDetails = [:]
 
         requiredFields.each { fieldName ->
-            def field = customFieldManager.getCustomFieldObjectsByName(fieldName)
+            def fields = customFieldManager.getCustomFieldObjectsByName(fieldName) // Typed as Collection
+            def field = fields ? fields[0] : null // Get first or null
             if (!field) {
                 missingFields.add(fieldName)
             } else {
@@ -115,43 +146,47 @@ class ProjectCreationScript {
      * Copy and assign permission scheme to project
      * This is done within the same lock to prevent race conditions
      */
-    private Map copyAndAssignPermissionScheme(Issue issue, Project project, Map projectDetails) {
+    private Map<String, Object> copyAndAssignPermissionScheme(Issue issue, Project project, Map<String, Object> projectDetails) {
+        if (isTestMode) {
+            log.warn("[TEST MODE] Skipping real permission scheme copy/assignment")
+            return [success: true]  // Mock success in test mode
+        }
+
         try {
             def permissionsScript = new CopyPermissionsScheme()
 
-            def allEmployeesView = projectDetails.allEmployeesView == "yes"
-            def allEmployeesEdit = projectDetails.allEmployeesEdit == "yes"
-            def isOpsec = projectDetails.opsecProgram != null && projectDetails.opsecProgram.trim() != ""
+            def allEmployeesView = ((projectDetails["allEmployeesView"] ?: "") as String).toLowerCase() == "yes"
+            def allEmployeesEdit = ((projectDetails["allEmployeesEdit"] ?: "") as String).toLowerCase() == "yes"
+            def isOpsec = projectDetails["opsecProgram"] != null && ((projectDetails["opsecProgram"] ?: "") as String).trim() != ""
 
-            // Copy the appropriate permission scheme
             def schemeResult = permissionsScript.execute(
                     project.name,
                     allEmployeesEdit,
                     allEmployeesView,
-                    isOpsec
-            )
+                    isOpsec,
+                    isTestMode
+            ) as Map<String, Object>
 
-            if (schemeResult.success) {
-                // Assign the new scheme to the project
+            if (schemeResult["success"] as boolean) {
                 def assignResult = permissionsScript.assignSchemeToProject(
                         project.key,
-                        schemeResult.scheme.name
-                )
+                        (schemeResult["scheme"] as PermissionScheme).name
+                ) as Map<String, Object>
 
-                if (!assignResult.success) {
-                    log.error("Failed to assign permission scheme: ${assignResult.error}")
-                    return [success: false, error: assignResult.error]
+                if (!(assignResult["success"] as boolean)) {
+                    log.error("Failed to assign permission scheme: ${assignResult["error"]}")
+                    return [success: false, error: assignResult["error"]]
                 }
 
                 log.warn("Successfully assigned permission scheme to project ${project.key}")
                 return [success: true]
             } else {
-                log.error("Failed to copy permission scheme: ${schemeResult.error}")
-                return [success: false, error: schemeResult.error]
+                log.error("Failed to copy permission scheme: ${schemeResult["error"]}")
+                return [success: false, error: schemeResult["error"]]
             }
         } catch (Exception e) {
             log.error("Error setting up permission scheme", e)
-            return [success: false, error: "Permission scheme error: ${e.message}"]
+            return [success: false, error: "Permission scheme error: ${e.message}"] as Map<String, Object>
         }
     }
 
@@ -164,19 +199,20 @@ class ProjectCreationScript {
         this.clusterLockService = ComponentAccessor.getComponent(ClusterLockService.class)
         this.commentManager = ComponentAccessor.getCommentManager()
         this.permissionSchemeManager = ComponentAccessor.getPermissionSchemeManager()
+        this.projectRoleService = ComponentAccessor.getComponent(ProjectRoleService.class)
     }
 
     /**
      * Main entry point for creating a project from an issue
      */
-    def createProjectFromIssue(Issue issue) {
+    Map<String, Object> createProjectFromIssue(Issue issue) {
         log.warn("Starting project creation from issue: ${issue?.key}")
 
         try {
             // Validate issue first
             if (!issue) {
                 log.error("Issue is null")
-                return [success: false, error: "Issue is null"]
+                return [success: false, error: "Issue is null"] as Map<String, Object>
             }
 
             // Validate custom fields exist
@@ -187,37 +223,37 @@ class ProjectCreationScript {
             }
 
             // Extract project details from issue
-            def projectDetails = extractProjectDetails(issue)
-            log.warn("Extracted project details: ${projectDetails}")
+            def details = extractProjectDetails(issue)
+            log.warn("Extracted project details: ${details}")
 
-            if (!projectDetails) {
+            if (!details) {
                 log.error("Failed to extract project details from issue ${issue.key}")
                 addCommentToIssue(issue, "Error: Failed to extract project details. Check that all required custom fields are filled.")
-                return [success: false, error: "Failed to extract project details"]
+                return [success: false, error: "Failed to extract project details"] as Map<String, Object>
             }
 
             // CRITICAL: Validate project key was generated successfully
-            if (!projectDetails.projectKey || projectDetails.projectKey.trim().isEmpty()) {
+            if (!details["projectKey"] || ((details["projectKey"] ?: "") as String).trim().isEmpty()) {
                 log.error("Failed to generate valid project key for issue ${issue.key}")
                 addCommentToIssue(issue, "Error: Could not generate project key. Check custom fields and issue summary.")
-                return [success: false, error: "Project key generation failed"]
+                return [success: false, error: "Project key generation failed"] as Map<String, Object>
             }
 
             // Validate project doesn't already exist
-            if (projectExists(projectDetails.projectKey, projectDetails.projectName as String)) {
-                log.warn("Project with key ${projectDetails.projectKey} already exists")
-                addCommentToIssue(issue, "Error: Project with key ${projectDetails.projectKey} already exists")
-                return [success: false, error: "Project with key ${projectDetails.projectKey} already exists"]
+            if (projectExists(details["projectKey"] as String, details["projectName"] as String)) {
+                log.warn("Project with key ${details.projectKey} already exists")
+                addCommentToIssue(issue, "Error: Project with key ${details.projectKey} already exists")
+                return [success: false, error: "Project with key ${details.projectKey} already exists"] as Map<String, Object>
             }
 
             // Acquire distributed lock for project creation using ClusterLockService
-            def lockKey = LOCK_PREFIX + projectDetails.projectKey
+            def lockKey = LOCK_PREFIX + details["projectKey"]
             def lock = clusterLockService.getLockForName(lockKey)
 
             if (!lock.tryLock(LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                log.error("Failed to acquire cluster lock for project creation: ${projectDetails.projectKey}")
+                log.error("Failed to acquire cluster lock for project creation: ${details.projectKey}")
                 addCommentToIssue(issue, "Failed to create project: Another process is currently creating this project. Please try again.")
-                return [success: false, error: "Another process is creating this project"]
+                return [success: false, error: "Another process is creating this project"] as Map<String, Object>
             }
 
             // Log which node acquired the lock
@@ -226,62 +262,77 @@ class ProjectCreationScript {
 
             try {
                 // Double-check project doesn't exist after acquiring lock
-                if (projectExists(projectDetails.projectKey, projectDetails.projectName as String)) {
-                    log.warn("Project with key ${projectDetails.projectKey} was created by another node")
-                    addCommentToIssue(issue, "Project with key ${projectDetails.projectKey} was created by another process")
-                    return [success: false, error: "Project was created by another process"]
+                if (projectExists(details["projectKey"] as String, details["projectName"] as String)) {
+                    log.warn("Project with key ${details.projectKey} was created by another node")
+                    addCommentToIssue(issue, "Project with key ${details.projectKey} was created by another process")
+                    return [success: false, error: "Project was created by another process"] as Map<String, Object>
                 }
 
                 // Create project with retry logic
-                def result = createProjectWithRetry(projectDetails)
+                def result = createProjectWithRetry(details)
 
-                if (result.success) {
+                if (result["success"] as boolean) {
                     // Clear cache after successful creation
-                    clearProjectCache(projectDetails.projectKey)
-                    log.warn("Successfully created project: ${projectDetails.projectKey}")
+                    clearProjectCache(details["projectKey"] as String)
+                    log.warn("Successfully created project: ${details.projectKey}")
 
                     // Copy and assign permissions scheme while still holding the lock
-                    def permissionResult = copyAndAssignPermissionScheme(issue, result.project, projectDetails)
+                    def permissionResult = copyAndAssignPermissionScheme(issue, result["project"] as Project, details)
 
-                    if (permissionResult.success) {
-                        def noSpaceProjectName = projectDetails.projectName.replaceAll("\\s+", "").toLowerCase()
+                    if (permissionResult["success"] as boolean) {
+                        def noSpaceProjectName = ((details["projectName"] ?: "") as String).replaceAll("\\s+", "").toLowerCase()
 
-                        // Notification scheme setup
-                        def notificationResult = setupNotificationScheme(result.project, noSpaceProjectName)
-                        if (!notificationResult.success) {
-                            log.warn("Notification scheme setup failed: ${notificationResult.error}")
-                            result.notificationError = notificationResult.error
-                            addCommentToIssue(issue, "Project created, but notification scheme failed: ${notificationResult.error}")
+                        // Try to setup other schemes, catch failures to add comments but not rollback
+                        try {
+                            def notificationResult = setupNotificationScheme(result["project"] as Project, noSpaceProjectName)
+                            if (!(notificationResult["success"] as boolean)) {
+                                log.warn("Notification scheme setup failed: ${notificationResult["error"]}")
+                                result["notificationError"] = notificationResult["error"]
+                                addCommentToIssue(issue, "Project created, but notification scheme failed: ${notificationResult["error"]}")
+                            }
+                        } catch (Exception e) {
+                            log.error("Notification scheme setup exception", e)
+                            addCommentToIssue(issue, "Project created, but notification scheme failed: ${e.message}")
                         }
 
-                        def priorityResult = setupPriorityScheme(result.project, noSpaceProjectName)
-                        if (!priorityResult.success) {
-                            log.warn("Priority scheme setup failed: ${priorityResult.error}")
-                            result.priorityError = priorityResult.error
-                            addCommentToIssue(issue, "Project created, but priority scheme failed: ${priorityResult.error}")
+                        try {
+                            def priorityResult = setupPriorityScheme(result["project"] as Project, noSpaceProjectName)
+                            if (!(priorityResult["success"] as boolean)) {
+                                log.warn("Priority scheme setup failed: ${priorityResult["error"]}")
+                                result["priorityError"] = priorityResult["error"]
+                                addCommentToIssue(issue, "Project created, but priority scheme failed: ${priorityResult["error"]}")
+                            }
+                        } catch (Exception e) {
+                            log.error("Priority scheme setup exception", e)
+                            addCommentToIssue(issue, "Project created, but priority scheme failed: ${e.message}")
                         }
 
-                        def fieldLayoutResult = setupFieldLayoutScheme(result.project, noSpaceProjectName)
-                        if (!fieldLayoutResult.success) {
-                            log.warn("Field layout scheme setup failed: ${fieldLayoutResult.error}")
-                            result.fieldLayoutError = fieldLayoutResult.error
-                            addCommentToIssue(issue, "Project created, but field layout scheme failed: ${fieldLayoutResult.error}")
+                        try {
+                            def fieldLayoutResult = setupFieldLayoutScheme(result["project"] as Project, noSpaceProjectName)
+                            if (!(fieldLayoutResult["success"] as boolean)) {
+                                log.warn("Field layout scheme setup failed: ${fieldLayoutResult["error"]}")
+                                result["fieldLayoutError"] = fieldLayoutResult["error"]
+                                addCommentToIssue(issue, "Project created, but field layout scheme failed: ${fieldLayoutResult["error"]}")
+                            }
+                        } catch (Exception e) {
+                            log.error("Field layout scheme setup exception", e)
+                            addCommentToIssue(issue, "Project created, but field layout scheme failed: ${e.message}")
                         }
                     }
 
                     // Get base URL for the hyperlink
                     def baseUrl = ComponentAccessor.applicationProperties.getString("jira.baseurl")
-                    def projectLink = "[${projectDetails.projectKey}|${baseUrl}/projects/${projectDetails.projectKey}]"
+                    def projectLink = "[${details.projectKey}|${baseUrl}/projects/${details.projectKey}]"
 
-                    if (permissionResult.success) {
+                    if (permissionResult["success"] as boolean) {
                         addCommentToIssue(issue, "Successfully created project: ${projectLink} with permissions configured.")
                     } else {
-                        addCommentToIssue(issue, "Project created: ${projectLink}, but permission scheme assignment failed: ${permissionResult.error}")
+                        addCommentToIssue(issue, "Project created: ${projectLink}, but permission scheme assignment failed: ${permissionResult["error"]}")
                         // Update the result to indicate partial success
-                        result.permissionError = permissionResult.error
+                        result["permissionError"] = permissionResult["error"]
                     }
                 } else {
-                    addCommentToIssue(issue, "Failed to create project: ${result.error}")
+                    addCommentToIssue(issue, "Failed to create project: ${result["error"]}")
                 }
 
                 return result
@@ -293,23 +344,37 @@ class ProjectCreationScript {
         } catch (Exception e) {
             log.error("Error creating project from issue ${issue?.key}", e)
             addCommentToIssue(issue, "Failed to create project: ${e.message}")
-            return [success: false, error: "Unexpected error: ${e.message}"]
+            return [success: false, error: "Unexpected error: ${e.message}"] as Map<String, Object>
         }
     }
 
-    private Map setupNotificationScheme(Project project, String noSpaceProjectName) {
+    private Map<String, Object> setupNotificationScheme(Project project, String noSpaceProjectName) {
         try {
             def notificationSchemeManager = ComponentAccessor.getNotificationSchemeManager()
             def notificationSchemeName = "app-jira-" + noSpaceProjectName + "-notification-scheme"
-            def refScheme = notificationSchemeManager.getSchemeObject(NOTIFICATION_REF_SCHEME_ID)
-            if (!refScheme) return [success: false, error: "Ref notification scheme not found"]
+            def refScheme = notificationSchemeManager.getSchemeObject("Default Notification Scheme")
+            if (!refScheme) return [success: false, error: "Ref notification scheme not found"] as Map<String, Object>
 
             def newScheme = notificationSchemeManager.getSchemeObject(notificationSchemeName)
             if (!newScheme) {
                 newScheme = notificationSchemeManager.createSchemeObject(notificationSchemeName, refScheme.getDescription())
-                def refEntities = notificationSchemeManager.getEntities(refScheme.getGenericValue())
+                def refEntities = refScheme.getEntities()
                 refEntities.each { entity ->
-                    notificationSchemeManager.createSchemeEntity(newScheme.getGenericValue(), entity)
+                    def eventTypeId = entity.getEntityTypeId()
+                    def type = entity.getType()
+                    def parameter = entity.getParameter()
+                    def templateId = entity.getTemplateId()
+
+                    if (eventTypeId == null || type == null) {
+                        log.warn("Skipping invalid notification entity: eventTypeId=${eventTypeId}, type=${type}, parameter=${parameter}, templateId=${templateId}")
+                        return
+                    }
+
+                    def schemeEntity = new SchemeEntity(type, parameter, eventTypeId)
+                    if (templateId != null) {
+                        schemeEntity.setTemplateId(templateId)
+                    }
+                    notificationSchemeManager.createSchemeEntity(notificationSchemeManager.getScheme(newScheme.id), schemeEntity)
                 }
             }
 
@@ -320,11 +385,11 @@ class ProjectCreationScript {
             return [success: true]
         } catch (Exception e) {
             log.error("Error setting notification scheme", e)
-            return [success: false, error: e.message]
+            return [success: false, error: e.message] as Map<String, Object>
         }
     }
 
-    private Map setupPriorityScheme(Project project, String noSpaceProjectName) {
+    private Map<String, Object> setupPriorityScheme(Project project, String noSpaceProjectName) {
         try {
             def prioritySchemeManager = ComponentAccessor.getComponent(PrioritySchemeManager.class)
             def prioritySchemeName = "app-jira-" + noSpaceProjectName + "-priority-scheme"
@@ -337,19 +402,22 @@ class ProjectCreationScript {
             }
 
             // Assign if not already
-            if (prioritySchemeManager.getSchemeFor(project)?.name != prioritySchemeName) {
-                prioritySchemeManager.removeSchemesFromProject(project)
-                prioritySchemeManager.assignToProject(fieldConfigScheme, project)
+            def currentScheme = prioritySchemeManager.getScheme(project)
+            if (currentScheme?.name != prioritySchemeName) {
+                if (currentScheme) {
+                    prioritySchemeManager.unassignProject(currentScheme, project)
+                }
+                prioritySchemeManager.assignProject(fieldConfigScheme, project)
             }
 
             return [success: true]
         } catch (Exception e) {
             log.error("Error setting priority scheme", e)
-            return [success: false, error: e.message]
+            return [success: false, error: e.message] as Map<String, Object>
         }
     }
 
-    private Map setupFieldLayoutScheme(Project project, String noSpaceProjectName) {
+    private Map<String, Object> setupFieldLayoutScheme(Project project, String noSpaceProjectName) {
         try {
             def fieldLayoutManager = ComponentAccessor.getFieldLayoutManager()
             def fieldConfigSchemeName = "app-jira-" + noSpaceProjectName + "-field-config-scheme"
@@ -374,14 +442,22 @@ class ProjectCreationScript {
             }
 
             // Assign if not already
-            if (fieldLayoutManager.getFieldLayoutSchemeForProject(project)?.name != fieldConfigSchemeName) {
-                fieldLayoutManager.addSchemeToProject(project, fieldLayoutScheme.id)
+            // Remove any existing scheme associations
+            def currentSchemes = fieldLayoutManager.getFieldLayoutSchemes().findAll { scheme ->
+                fieldLayoutManager.getProjectsUsing(scheme).any { p -> p.id == project.id }
             }
+            if (currentSchemes) {
+                currentSchemes.each { scheme ->
+                    fieldLayoutManager.removeSchemeAssociation(project, scheme.id)
+                }
+            }
+            // Assign the new scheme
+            fieldLayoutManager.addSchemeAssociation(project, fieldLayoutScheme.id)
 
             return [success: true]
         } catch (Exception e) {
             log.error("Error setting field layout scheme", e)
-            return [success: false, error: e.message]
+            return [success: false, error: e.message] as Map<String, Object>
         }
     }
 
@@ -389,62 +465,71 @@ class ProjectCreationScript {
      * Extract project details from issue custom fields
      * Improved with better null handling and validation
      */
-    private Map extractProjectDetails(Issue issue) {
+    private Map<String, Object> extractProjectDetails(Issue issue) {
         try {
-            def details = [:]
+            def details = [:] as Map<String, Object>
 
-            if (!issue) {
-                log.error("Issue is null")
-                return null
+            if (isTestMode) {
+                // Hardcoded mock data for test mode - customize as needed
+                log.warn("Test mode: Using hardcoded mock project details")
+                details.projectName = "Test Automation Project"
+                details.projectType = "Software - Kanban - (Most Popular Choice)"
+                details.projectLead = "admin"  // Replace with a valid username from your Jira
+                details.adminUsers = "admin,user1"
+                details.serviceDeskUsers = "servicedesk1,servicedesk2"
+                details.allEmployeesView = "yes"
+                details.allEmployeesEdit = "no"
+                details.useWithJIP = "no"
+                details.opsecProgram = ""
+                details.projectCategory = "Development"
+            } else {
+                // Real extraction using custom fields
+                details.projectName = getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD)?.trim() ?: issue.summary?.trim() ?: "Default Project"
+                details.projectType = getCustomFieldValue(issue, PROJECT_TYPE)?.trim() ?: "Business - Project Management"  // Default fallback
+                details.projectLead = getCustomFieldValue(issue, PROJECT_LEAD)?.trim()
+                details.adminUsers = getCustomFieldValue(issue, ADMIN_USERS)?.trim()
+                details.serviceDeskUsers = getCustomFieldValue(issue, SERVICE_DESK_USERS)?.trim()
+                details.allEmployeesView = getCustomFieldValue(issue, ALL_EMPLOYEES_VIEW)?.toLowerCase()?.trim()
+                details.allEmployeesEdit = getCustomFieldValue(issue, ALL_EMPLOYEES_EDIT)?.toLowerCase()?.trim()
+                details.useWithJIP = getCustomFieldValue(issue, USE_WITH_JIP)?.toLowerCase()?.trim()
+                details.opsecProgram = getCustomFieldValue(issue, OPSEC_PROGRAM)?.trim()
+                details.projectCategory = getCustomFieldValue(issue, PROJECT_CATEGORY)?.trim()
             }
 
-            // Get the value from the "New Project Or Team Space Name" field to be used for both the project key and name.
-            def newProjectNameValue = getCustomFieldValue(issue, NEW_PROJECT_NAME_FIELD)
-            log.warn("Value from '${NEW_PROJECT_NAME_FIELD}': '${newProjectNameValue}'")
-
-            // Determine the base project name: Use the custom field, or fall back to the issue summary.
-            def baseProjectName = newProjectNameValue?.trim() ?: issue.summary?.trim()
-
-            if (!baseProjectName) {
-                log.error("Could not determine a project name from custom field ('${NEW_PROJECT_NAME_FIELD}') or issue summary.")
-                return null
-            }
-
-            // The project KEY is generated preferentially from the custom field value.
-            details.projectKey = generateProjectKey(issue, newProjectNameValue)
-
-            // Generate a UNIQUE project name by appending the key to the base name.
-            def sanitizedProjectName = baseProjectName.replaceAll(/[<>:"\/\\|?*]/, "")
-            def uniqueProjectName = "${sanitizedProjectName} (${details.projectKey})"
-
-            // Enforce Jira's 80-character limit for project names.
-            if (uniqueProjectName.length() > 80) {
-                def truncateLength = 80 - " (${details.projectKey})".length()
-                sanitizedProjectName = sanitizedProjectName.take(truncateLength)
-                uniqueProjectName = "${sanitizedProjectName} (${details.projectKey})"
-            }
-            details.projectName = uniqueProjectName
-
-            // Get all other custom field values.
-            details.projectType = getCustomFieldValue(issue, PROJECT_TYPE)
-            details.projectLead = getCustomFieldValue(issue, PROJECT_LEAD)
-            details.adminUsers = getCustomFieldValue(issue, ADMIN_USERS)
-            details.serviceDeskUsers = getCustomFieldValue(issue, SERVICE_DESK_USERS)
-            details.allEmployeesView = getCustomFieldValue(issue, ALL_EMPLOYEES_VIEW)
-            details.allEmployeesEdit = getCustomFieldValue(issue, ALL_EMPLOYEES_EDIT)
-            details.useWithJIP = getCustomFieldValue(issue, USE_WITH_JIP)
-            details.opsecProgram = getCustomFieldValue(issue, OPSEC_PROGRAM)
-
-            // Log all extracted values for debugging
-            log.warn("Extracted values - Name: '${details.projectName}', Key: '${details.projectKey}', Type: '${details.projectType}', Lead: '${details.projectLead}'")
-            log.warn("Role assignments - Admin Users: '${details.adminUsers}', Service Desk Users: '${details.serviceDeskUsers}'")
-            log.warn("Employee permissions - View: '${details.allEmployeesView}', Edit: '${details.allEmployeesEdit}'")
-            log.warn("Other settings - JIP: '${details.useWithJIP}', OPSEC: '${details.opsecProgram}'")
+            // Generate key after name is set (applies to both test and real modes)
+            details.projectKey = generateProjectKey(issue, details.projectName as String)
 
             // Validate required fields
-            if (!details.projectName || !details.projectKey || !details.projectType || !details.projectLead) {
-                log.error("Missing required fields for project creation - Name: ${details.projectName}, Key: ${details.projectKey}, Type: ${details.projectType}, Lead: ${details.projectLead}")
+            def required = ["projectName", "projectKey", "projectType", "projectLead"]
+            def missing = required.findAll { !details[it] || (details[it] as String).trim().isEmpty() }
+            if (missing) {
+                log.error("Missing required fields: ${missing}")
                 return null
+            }
+
+            // Validate project lead exists early (skip in test mode if needed)
+            def userManager = ComponentAccessor.getUserManager()
+            def leadUser = userManager.getUserByName(details.projectLead as String)
+            if (!leadUser && !isTestMode) {  // Skip user validation in test mode
+                log.error("Project Lead user '${details.projectLead}' not found.")
+                return null
+            }
+
+            // Validate admin and service desk users if provided (skip in test mode)
+            if (!isTestMode) {
+                if (details.adminUsers) {
+                    def invalidAdmins = parseUserList(details.adminUsers as String).findAll { !userManager.getUserByName(it) }
+                    if (invalidAdmins) {
+                        log.warn("Invalid admin users: ${invalidAdmins}")
+                        // Continue but log; could throw if strict
+                    }
+                }
+                if (details.serviceDeskUsers) {
+                    def invalidService = parseUserList(details.serviceDeskUsers as String).findAll { !userManager.getUserByName(it) }
+                    if (invalidService) {
+                        log.warn("Invalid service desk users: ${invalidService}")
+                    }
+                }
             }
 
             return details
@@ -458,7 +543,7 @@ class ProjectCreationScript {
     /**
      * Create project with retry logic for handling transient failures
      */
-    private Map createProjectWithRetry(Map projectDetails) {
+    private Map<String, Object> createProjectWithRetry(Map<String, Object> projectDetails) {
         def attempts = 0
         def lastError = null
 
@@ -475,99 +560,127 @@ class ProjectCreationScript {
 
                 if (attempts < MAX_RETRIES) {
                     // Use exponential backoff with jitter instead of simple sleep
-                    def backoffTime = (long) (Math.pow(2, attempts) * 1000 * (0.5 + Math.random() * 0.5))
+                    def backoffTime = (long) (Math.pow(2, attempts) * 1000 + Math.random() * 1000)  // Add jitter
                     Thread.sleep(backoffTime)
                 }
             }
         }
 
         log.error("Failed to create project after ${MAX_RETRIES} attempts", lastError)
-        return [success: false, error: "Failed after ${MAX_RETRIES} attempts: ${lastError?.message}"]
+        return [success: false, error: "Failed after ${MAX_RETRIES} attempts: ${lastError?.message}"] as Map<String, Object>
     }
 
     /**
      * Create the project and configure permissions
      */
-    private Map createProject(Map details) {
-        log.warn("Creating project with key: ${details.projectKey}")
+    private Map<String, Object> createProject(Map<String, Object> projectDetails) {
+        log.warn("Creating project with key: ${projectDetails.projectKey}")
 
         // Get the current user
         def currentUser = ComponentAccessor.jiraAuthenticationContext.loggedInUser
 
         // Get the project lead user object from the username string
         def userManager = ComponentAccessor.getUserManager()
-        def leadUser = userManager.getUserByName(details.projectLead)
+        def leadUser = userManager.getUserByName(projectDetails["projectLead"] as String)
 
         if (!leadUser) {
-            log.error("Project Lead user '${details.projectLead}' not found.")
-            return [success: false, error: "Project Lead user '${details.projectLead}' not found."]
+            log.error("Project Lead user '${projectDetails.projectLead}' not found.")
+            return [success: false, error: "Project Lead user '${projectDetails.projectLead}' not found."] as Map<String, Object>
         }
 
-        // Create project creation data
-        def builder = new ProjectCreationData.Builder()
-                .withName(details.projectName)
-                .withKey(details.projectKey)
-                .withDescription(details.projectName?.take(255)) // Limit description length
-                .withLead(leadUser)
-                .withAssigneeType(AssigneeTypes.PROJECT_LEAD)
-
         // Set project type
-        def projectTypeKey = PROJECT_TYPE_MAPPING[details.projectType] ?: "business"
-        builder.withType(projectTypeKey)
+        def projectTypeKey = PROJECT_TYPE_MAPPING[projectDetails["projectType"]] ?: "business"
 
+        // Determine template key based on project type
+        def templateKey = PROJECT_TEMPLATE_MAPPING[projectDetails["projectType"]] ?: "com.atlassian.jira-core-project-templates:jira-core-simplified-project-management"
+
+        // Get project category if specified
+        ProjectCategory category = projectDetails["projectCategory"] ? projectManager.getAllProjectCategories().find { it.name == (projectDetails["projectCategory"] as String) } : null
+        if (!category && projectDetails["projectCategory"]) {
+            log.warn("Project category '${projectDetails["projectCategory"]}' not found - proceeding without category")
+        }
+
+        // Create project creation data using builder with reassignment to preserve types for static checking
+        ProjectCreationData.Builder builder = new ProjectCreationData.Builder()
+        builder = builder.withName(projectDetails["projectName"] as String)
+        builder = builder.withKey(projectDetails["projectKey"] as String)
+        builder = builder.withDescription((projectDetails["projectName"] as String)?.take(255) ?: "")
+        builder = builder.withLead(leadUser)
+        builder = builder.withAssigneeType(AssigneeTypes.PROJECT_LEAD as long)
+        builder = builder.withType(projectTypeKey as String)
+        builder = builder.withProjectTemplateKey(templateKey)
         def projectCreationData = builder.build()
 
         // Validate and create project
-        def validationResult = projectService.validateCreateProject(currentUser, projectCreationData)
+        def validationResult = projectService.validateCreateProject(currentUser, projectCreationData) as ProjectService.CreateProjectValidationResult
 
         if (!validationResult.valid) {
             def errors = validationResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }.join(", ")
             log.error("Project validation failed: ${errors}")
-            return [success: false, error: "Validation failed: ${errors}"]
+            return [success: false, error: "Validation failed: ${errors}"] as Map<String, Object>
         }
 
-        def projectResult = projectService.createProject(validationResult)
-
-        // Handle different possible result structures for Jira 9.12
-        def isValid = false
-        def project = null
-        def errors = []
-
+        Project project
         try {
-            // Updated logic to handle the project creation result more reliably.
-            // On success, 'createProject' returns a Project object. On failure, it returns a result object with errors.
-            if (projectResult instanceof Project) {
-                isValid = true
-                project = projectResult
-            } else if (projectResult.hasProperty('isValid') && !projectResult.isValid()) {
-                isValid = false
-                if (projectResult.hasProperty('errorCollection')) {
-                    errors = projectResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }
-                }
-            } else if (projectResult.hasProperty('errorCollection') && projectResult.errorCollection.hasErrors()) {
-                isValid = false
-                errors = projectResult.errorCollection.errors.collect { "${it.key}: ${it.value}" }
-            } else if (projectResult.hasProperty('project') && projectResult.project != null) {
-                // Fallback for other result wrapper types
-                isValid = true
-                project = projectResult.project
-            }
-
+            project = projectService.createProject(validationResult)
+        } catch (IllegalStateException e) {
+            log.error("Project creation failed due to validation error after passing validation", e)
+            return [success: false, error: "Creation failed: ${e.message}"] as Map<String, Object>
         } catch (Exception e) {
-            log.error("Error checking project creation result", e)
-            return [success: false, error: "Error checking project creation result: ${e.message}"]
+            log.error("Unexpected error during project creation", e)
+            return [success: false, error: "Creation failed: ${e.message}"] as Map<String, Object>
         }
 
-        if (!isValid || !project) {
-            def errorMsg = errors ? errors.join(", ") : "Project creation failed"
-            log.error("Project creation failed: ${errorMsg}")
-            return [success: false, error: "Creation failed: ${errorMsg}"]
+        if (!project) {
+            log.error("Project creation returned null")
+            return [success: false, error: "Creation failed: null project"] as Map<String, Object>
+        }
+
+        // Set project category after creation if specified
+        if (category) {
+            try {
+                // Update project with category using UpdateProjectParameters
+                def updateParams = UpdateProjectParameters.forProject(project.id)
+                    .name(project.name)
+                    .description(project.description)
+                    .leadUserKey(project.getProjectLead()?.key)
+                    .url(project.url)
+                    .assigneeType(project.assigneeType)
+                    .avatarId(project.avatar?.id)
+                    .projectCategoryId(category.id)
+                def updatedProject = projectManager.updateProject(updateParams) as Project
+                if (updatedProject) {
+                    project = updatedProject
+                    log.warn("Successfully updated project ${project.key} with category ${category.name}")
+                } else {
+                    log.warn("Failed to update project category, but proceeding")
+                }
+            } catch (Exception e) {
+                log.warn("Error updating project category: ${e.message}", e)
+            }
         }
 
         log.warn("Project created successfully, now configuring permissions for: ${project.key}")
 
-        // Configure project permissions
-        configureProjectPermissions(project, details)
+        // Configure project permissions with try-catch to clean up on failure
+        try {
+            configureProjectPermissions(project, projectDetails)
+        } catch (Exception e) {
+            log.error("Failed to configure permissions for ${project.key} - deleting partial project", e)
+            // Safely delete the partial project to avoid duplicates on retry
+            def deleteValidation = projectService.validateDeleteProject(currentUser, project.key)
+            if (deleteValidation.valid) {
+                def deleteResult = projectService.deleteProject(currentUser, deleteValidation)
+                if (deleteResult.valid) {
+                    log.warn("Deleted partial project ${project.key}")
+                } else {
+                    log.error("Could not delete partial project ${project.key}: ${deleteResult.errorCollection}")
+                }
+            } else {
+                log.error("Could not validate delete for partial project ${project.key}: ${deleteValidation.errorCollection}")
+            }
+            return [success: false, error: "Permission configuration failed: ${e.message}"] as Map<String, Object>
+        }
 
         return [success: true, project: project]
     }
@@ -575,13 +688,13 @@ class ProjectCreationScript {
     /**
      * Configure project permissions based on custom field values - REVISED VERSION
      */
-    private void configureProjectPermissions(Project project, Map details) {
+    private void configureProjectPermissions(Project project, Map<String, Object> details) {
         log.warn("Configuring permissions for project: ${project.key}")
 
         try {
             // Add administrators - with better validation
-            if (details.adminUsers?.trim()) {
-                def adminUsersList = parseUserList(details.adminUsers)
+            if ((details["adminUsers"] as String)?.trim()) {
+                def adminUsersList = parseUserList(details["adminUsers"] as String)
                 log.warn("Adding admin users: ${adminUsersList}")
                 addUsersToRole(project, ROLE_ADMINISTRATORS, adminUsersList)
             } else {
@@ -589,8 +702,8 @@ class ProjectCreationScript {
             }
 
             // Add service desk users - with better validation
-            if (details.serviceDeskUsers?.trim()) {
-                def serviceDeskUsersList = parseUserList(details.serviceDeskUsers)
+            if ((details["serviceDeskUsers"] as String)?.trim()) {
+                def serviceDeskUsersList = parseUserList(details["serviceDeskUsers"] as String)
                 log.warn("Adding service desk users: ${serviceDeskUsersList}")
                 addUsersToRole(project, ROLE_SERVICE_DESK_TEAM, serviceDeskUsersList)
             } else {
@@ -598,12 +711,12 @@ class ProjectCreationScript {
             }
 
             // Configure all employees permissions
-            if (details.allEmployeesView == "yes") {
+            if ((details["allEmployeesView"] as String) == "yes") {
                 log.warn("Adding all employees to Users role")
                 addGroupToRole(project, ALL_EMPLOYEES_GROUP, ROLE_USERS)
             }
 
-            if (details.allEmployeesEdit == "yes") {
+            if ((details["allEmployeesEdit"] as String) == "yes") {
                 log.warn("Adding all employees to Developers role")
                 addGroupToRole(project, ALL_EMPLOYEES_GROUP, ROLE_DEVELOPERS)
             }
@@ -625,25 +738,22 @@ class ProjectCreationScript {
             def role = projectRoleManager.getProjectRole(roleName)
             if (!role) {
                 log.error("Role not found: ${roleName}")
-                return
+                throw new RuntimeException("Required role missing: ${roleName}")  // Fail fast
             }
 
             log.warn("Adding ${usernames.size()} users to role ${roleName} in project ${project.key}")
 
-            def validUserKeys = []
+            List<String> validUserKeys = []
             def invalidUsers = []
 
             usernames.each { username ->
-                if (!username?.trim()) {
-                    return // Skip empty usernames
-                }
-
+                if (!username?.trim()) return
                 def user = ComponentAccessor.userManager.getUserByName(username.trim())
                 if (user) {
-                    validUserKeys.add(user.key) // We need user keys for addActorsToProjectRole
+                    validUserKeys << user.key
                     log.warn("Found user: ${username} (key: ${user.key})")
                 } else {
-                    invalidUsers.add(username)
+                    invalidUsers << username
                     log.error("User not found: ${username}")
                 }
             }
@@ -653,10 +763,8 @@ class ProjectCreationScript {
             }
 
             if (validUserKeys) {
-                // Use the additive method to avoid overwriting existing role actors
                 def errorCollection = new SimpleErrorCollection()
-                projectRoleManager.addActorsToProjectRole(validUserKeys, role, project, ProjectRoleActor.USER_ROLE_ACTOR_TYPE, errorCollection)
-
+                projectRoleService.addActorsToProjectRole(validUserKeys, role, project, ProjectRoleActor.USER_ROLE_ACTOR_TYPE, errorCollection)
                 if (errorCollection.hasAnyErrors()) {
                     log.error("Error adding users to role ${roleName}: ${errorCollection.errors}")
                 } else {
@@ -665,7 +773,6 @@ class ProjectCreationScript {
             } else {
                 log.warn("No valid users to add to role ${roleName}")
             }
-
         } catch (Exception e) {
             log.error("Error adding users to role ${roleName}", e)
             throw e
@@ -680,26 +787,23 @@ class ProjectCreationScript {
             def role = projectRoleManager.getProjectRole(roleName)
             if (!role) {
                 log.error("Role not found: ${roleName}")
-                return
+                throw new RuntimeException("Required role missing: ${roleName}")
             }
 
             // Check if group exists
             def groupManager = ComponentAccessor.getGroupManager()
-            if (!groupManager.getGroup(groupName) ) {
+            if (!groupManager.getGroup(groupName)) {
                 log.error("Group not found: ${groupName}")
-                return
+                throw new RuntimeException("Required group missing: ${groupName}")
             }
 
-            // Use the additive method to avoid overwriting existing role actors
             def errorCollection = new SimpleErrorCollection()
-            projectRoleManager.addActorsToProjectRole([groupName], role, project, ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE, errorCollection)
-
+            projectRoleService.addActorsToProjectRole([groupName], role, project, ProjectRoleActor.GROUP_ROLE_ACTOR_TYPE, errorCollection)
             if (errorCollection.hasAnyErrors()) {
                 log.error("Error adding group ${groupName} to role ${roleName}: ${errorCollection.errors}")
             } else {
                 log.warn("Successfully added group ${groupName} to role ${roleName}")
             }
-
         } catch (Exception e) {
             log.error("Error adding group ${groupName} to role ${roleName}", e)
             throw e
@@ -739,7 +843,8 @@ class ProjectCreationScript {
      */
     private String getCustomFieldValue(Issue issue, String fieldName) {
         try {
-            def customField = customFieldManager.getCustomFieldObjectsByName(fieldName)
+            def fields = customFieldManager.getCustomFieldObjectsByName(fieldName)
+            def customField = fields ? fields[0] : null
             if (!customField) {
                 log.error("Critical: Custom field '${fieldName}' not found in Jira configuration")
                 return null
@@ -837,7 +942,7 @@ class ProjectCreationScript {
             def keyForHashing = baseKey.take(4) // Shorten to make room for the hash suffix
 
             // Generate a hash of the issue key + timestamp for uniqueness
-            def uniqueString = "${issue.key}-${System.currentTimeMillis()}-${Thread.currentThread().threadId()}-${Math.random()}"
+            def uniqueString = "${issue.key}-${System.currentTimeMillis()}-${Thread.currentThread().id}-${Math.random()}"
             def messageDigest = MessageDigest.getInstance("MD5")
             def hashBytes = messageDigest.digest(uniqueString.getBytes())
             def hashString = hashBytes.encodeHex().toString().toUpperCase().replaceAll("[^A-Z0-9]", "")
@@ -850,7 +955,7 @@ class ProjectCreationScript {
             // Final validation and fallback to a completely safe key
             if (!projectKey || !projectKey.matches('^[A-Z][A-Z0-9]{1,9}$')) {
                 log.error("Invalid project key generated: '${projectKey}'. Falling back to default.")
-                def timestamp = System.currentTimeMillis().toString().takeLast(6)
+                def timestamp = System.currentTimeMillis().toString()[-6..-1]
                 def random = Math.abs(new Random().nextInt(999)).toString().padLeft(3, '0')
                 projectKey = "PR${timestamp}${random}".take(10)
             }
@@ -861,7 +966,7 @@ class ProjectCreationScript {
         } catch (Exception e) {
             log.error("Error generating project key", e)
             // Emergency fallback
-            def timestamp = System.currentTimeMillis().toString().takeLast(6)
+            def timestamp = System.currentTimeMillis().toString()[-6..-1]
             def emergencyKey = "ER${timestamp}"
             log.warn("Using emergency project key: ${emergencyKey}")
             return emergencyKey
@@ -873,6 +978,11 @@ class ProjectCreationScript {
         if (!projectKey || projectKey.trim().isEmpty()) {
             log.error("Cannot check if project exists: project key is null or empty")
             return true // Treat as existing to prevent proceeding
+        }
+
+        if (isTestMode) {
+            log.warn("[TEST MODE] Skipping real project existence check - assuming does not exist")
+            return false  // Mock non-existence for testing
         }
 
         try {
@@ -920,7 +1030,7 @@ class ProjectCreationScript {
         return cacheManager.getCache(CACHE_NAME, null,
                 new CacheSettingsBuilder()
                         .expireAfterAccess(5, TimeUnit.MINUTES)
-                        .maxEntries(1000)
+                        .maxEntries(100)  // Reduced based on suggestions
                         .build())
     }
 
@@ -938,6 +1048,10 @@ class ProjectCreationScript {
      */
     private void addCommentToIssue(Issue issue, String message) {
         try {
+            if (isTestMode) {
+                log.warn("[TEST MODE] Would add comment to ${issue?.key ?: 'mock'}: ${message}")
+                return
+            }
             if (!issue) {
                 log.error("Cannot add comment: issue is null")
                 return
@@ -959,7 +1073,6 @@ class ProjectCreationScript {
 class CopyPermissionsScheme {
 
     private static final Logger log = Logger.getLogger(CopyPermissionsScheme.class)
-    private static final String OPSEC_SCHEME_NAME = "app-jira-ironwood-permissions-scheme"
     private static final String OPSEC_SCHEME = "app-jira-ironwood-permissions-scheme"
     private static final String VIEW_ONLY_SCHEME = "app-jira-all-employees-view-only-permissions-scheme"
     private static final String EDIT_SCHEME = "app-jira-all-employees-edit-permissions-scheme"
@@ -987,51 +1100,88 @@ class CopyPermissionsScheme {
     /**
      * Execute permission scheme copy with proper error handling
      */
-    def execute(String projectName, boolean allEmployeesCanEdit, boolean allEmployeesCanView, boolean isOpsec) {
+    Map<String, Object> execute(String projectName, boolean allEmployeesCanEdit, boolean allEmployeesCanView, boolean isOpsec, boolean isTestMode) {
         log.warn("Executing CopyPermissionsScheme for project: ${projectName}")
 
         try {
             // Validate parameters
             if (!projectName?.trim()) {
                 log.error("Project name is required")
-                return [success: false, error: "Project name is required"]
+                return [success: false, error: "Project name is required"] as Map<String, Object>
             }
 
             if (allEmployeesCanEdit && !allEmployeesCanView) {
                 log.error("Invalid combination: allEmployeesCanEdit is true but allEmployeesCanView is false")
-                return [success: false, error: "Invalid permission combination"]
+                return [success: false, error: "Invalid permission combination"] as Map<String, Object>
             }
 
             // Determine source scheme
             String sourceSchemeName = determineSourceScheme(isOpsec, allEmployeesCanEdit, allEmployeesCanView)
             String newSchemeName = generateSchemeName(projectName)
 
+            // NEW: Append timestamp for uniqueness in test mode
+            if (isTestMode) {  // Assume isTestMode is accessible or passed in
+                newSchemeName += "-test-${System.currentTimeMillis()}"
+                log.warn("[TEST MODE] Appended unique suffix to scheme name: ${newSchemeName}")
+            }
+
             log.warn("Source scheme: ${sourceSchemeName}, New scheme: ${newSchemeName}")
+
+            // NEW: Check if scheme already exists
+            def existingScheme = permissionSchemeManager.getSchemeObject(newSchemeName)
+            if (existingScheme) {
+                if (isTestMode) {
+                    // In test mode, delete existing for cleanup (optional; remove if too aggressive)
+                    log.warn("[TEST MODE] Deleting existing scheme '${newSchemeName}' for re-creation")
+                    permissionSchemeManager.deleteScheme(existingScheme.id)
+                } else {
+                    log.warn("Scheme '${newSchemeName}' already exists - reusing it")
+                    return [success: true, scheme: existingScheme]  // Or error if you don't want reuse
+                }
+            }
 
             // Copy the permission scheme
             def sourceScheme = permissionSchemeManager.getSchemeObject(sourceSchemeName)
             if (!sourceScheme) {
                 log.error("Source scheme '${sourceSchemeName}' not found")
-                return [success: false, error: "Source scheme not found: ${sourceSchemeName}"]
+                return [success: false, error: "Source scheme not found: ${sourceSchemeName}"] as Map<String, Object>
             }
 
             def newScheme = permissionSchemeManager.createSchemeObject(newSchemeName, sourceScheme.getDescription())
             if (!newScheme) {
                 log.error("Failed to create new scheme '${newSchemeName}'")
-                return [success: false, error: "Failed to create scheme"]
+                return [success: false, error: "Failed to create scheme"] as Map<String, Object>
             }
 
-            def sourceGV = sourceScheme.getGenericValue()
-            def sourceEntities = permissionSchemeManager.getEntities(sourceGV)
-            sourceEntities.each { entity ->
-                permissionSchemeManager.createSchemeEntity(newScheme.getGenericValue(), entity)
+            // FIXED: Use getScheme() to get GenericValue (suppress deprecation if needed)
+            @SuppressWarnings("deprecation")
+            def sourceGV = permissionSchemeManager.getSchemeObject(sourceScheme.id)  // Returns GenericValue
+            def sourceEntities = permissionSchemeManager.getEntities(sourceGV as GenericValue)  // Expects GenericValue
+
+            sourceEntities.each { GenericValue entity ->
+                def type = entity.getString("type")
+                def parameter = entity.getString("parameter")
+                def permission = entity.getLong("permission")
+
+                log.warn("Processing permission entity: type='${type}', parameter='${parameter}', permission=${permission}")
+
+                if (type == null || type.trim().isEmpty() || permission == null) {
+                    log.warn("Skipping invalid entity: type='${type}', parameter='${parameter}', permission=${permission}")
+                    return
+                }
+
+                def schemeEntity = new SchemeEntity(type, parameter, permission)
+                
+                // FIXED: Get GenericValue for new scheme
+                def newGV = permissionSchemeManager.getSchemeObject(newScheme.id)  // Returns GenericValue
+                permissionSchemeManager.createSchemeEntity(newGV as GenericValue, schemeEntity)  // Expects GenericValue
             }
 
             return [success: true, scheme: newScheme]
 
         } catch (Exception e) {
             log.error("Failed to copy permission scheme", e)
-            return [success: false, error: "Unexpected error: ${e.message}"]
+            return [success: false, error: "Unexpected error: ${e.message}"] as Map<String, Object>
         }
     }
 
@@ -1058,18 +1208,18 @@ class CopyPermissionsScheme {
     /**
      * Assign permission scheme to project
      */
-    def assignSchemeToProject(String projectKey, String schemeName) {
+    Map<String, Object> assignSchemeToProject(String projectKey, String schemeName) {
         try {
             def project = projectManager.getProjectObjByKey(projectKey)
             if (!project) {
                 log.error("Project not found: ${projectKey}")
-                return [success: false, error: "Project not found"]
+                return [success: false, error: "Project not found"] as Map<String, Object>
             }
 
             def scheme = permissionSchemeManager.getSchemeObject(schemeName)
             if (!scheme) {
                 log.error("Permission scheme not found: ${schemeName}")
-                return [success: false, error: "Permission scheme not found"]
+                return [success: false, error: "Permission scheme not found"] as Map<String, Object>
             }
 
             // Assign scheme to project
@@ -1081,13 +1231,175 @@ class CopyPermissionsScheme {
 
         } catch (Exception e) {
             log.error("Failed to assign scheme to project", e)
-            return [success: false, error: "Failed to assign scheme: ${e.message}"]
+            return [success: false, error: "Failed to assign scheme: ${e.message}"] as Map<String, Object>
         }
     }
 }
 
+// Mock Issue for testing in Script Console - implementing Issue with all required stubs to satisfy static type checking
+class MockIssue implements Issue {
+    String key = "TEST-1"
+    String summary = "Test Summary"
+
+    // Explicit stubs for commonly used methods
+    Long getId() { return 1L }
+
+    String getKey() { return key }
+
+    String getSummary() { return summary }
+
+    Object getCustomFieldValue(Object cf) { return null }
+
+    Project getProjectObject() { return null }
+
+    IssueType getIssueType() { return null }
+
+    String getString(String field) { return null }
+
+    Timestamp getTimestamp(String field) { return null }
+
+    Long getLong(String field) { return null }
+
+    GenericValue getGenericValue() { return null }
+
+    void store() { /* do nothing for mock */ }
+
+    Long getProjectId() { return null }
+
+    // Additional stubs for all reported missing methods
+    IssueType getIssueTypeObject() { return null }
+
+    String getIssueTypeId() { return null }
+
+    GenericValue getProject() { return null }
+
+    ApplicationUser getAssigneeUser() { return null }
+
+    ApplicationUser getAssignee() { return null }
+
+    String getAssigneeId() { return null }
+
+    Collection getComponentObjects() { return [] }
+
+    Collection getComponents() { return [] }
+
+    ApplicationUser getReporterUser() { return null }
+
+    ApplicationUser getReporter() { return null }
+
+    String getReporterId() { return null }
+
+    ApplicationUser getCreator() { return null }
+
+    String getCreatorId() { return null }
+
+    String getDescription() { return null }
+
+    String getEnvironment() { return null }
+
+    Collection getAffectedVersions() { return [] }
+
+    Collection getFixVersions() { return [] }
+
+    Timestamp getDueDate() { return null }
+
+    GenericValue getSecurityLevel() { return null }
+
+    Long getSecurityLevelId() { return null }
+
+    Priority getPriority() { return null }
+
+    Priority getPriorityObject() { return null }
+
+    String getResolutionId() { return null }
+
+    Resolution getResolution() { return null }
+
+    Resolution getResolutionObject() { return null }
+
+    Long getNumber() { return null }
+
+    Long getVotes() { return null }
+
+    Long getWatches() { return null }
+
+    Timestamp getCreated() { return null }
+
+    Timestamp getUpdated() { return null }
+
+    Timestamp getResolutionDate() { return null }
+
+    Long getWorkflowId() { return null }
+
+    Object getCustomFieldValue(CustomField field) { return null }
+
+    Status getStatus() { return null }
+
+    String getStatusId() { return null }
+
+    Status getStatusObject() { return null }
+
+    Long getOriginalEstimate() { return null }
+
+    Long getEstimate() { return null }
+
+    Long getTimeSpent() { return null }
+
+    Object getExternalFieldValue(String fieldId) { return null }
+
+    boolean isSubTask() { return false }
+
+    Long getParentId() { return null }
+
+    boolean isCreated() { return true }
+
+    Issue getParentObject() { return null }
+
+    GenericValue getParent() { return null }
+
+    Collection getSubTasks() { return [] }
+
+    Collection getSubTaskObjects() { return [] }
+
+    boolean isEditable() { return false }
+
+    IssueRenderContext getIssueRenderContext() { return null }
+
+    Collection getAttachments() { return [] }
+
+    Set getLabels() { return [] as Set }
+
+    boolean isArchived() { return false }
+
+    ApplicationUser getArchivedByUser() { return null }
+
+    String getArchivedById() { return null }
+
+    Timestamp getArchivedDate() { return null }
+
+    // Dynamic handler for any other missing methods (fallback)
+    def methodMissing(String name, args) {
+        log.warn("[MOCK] Unimplemented method called: ${name}")
+        if (name.startsWith('get') || name.startsWith('is')) {
+            return null
+        } else if (name.startsWith('set')) {
+            return  // void
+        }
+        throw new MissingMethodException(name, this.class, args)
+    }
+
+    def propertyMissing(String name) {
+        log.warn("[MOCK] Unimplemented property accessed: ${name}")
+        return null
+    }
+
+    // Add more if needed
+}
+
 // Script execution entry point
-def issue = issue  // The issue variable should be available in the script context
+// def issue = issue  // Comment out original
+
+def issue = new MockIssue()  // Use mock for testing
 
 // Validate that issue exists before proceeding
 if (!issue) {
@@ -1098,16 +1410,15 @@ if (!issue) {
 log.warn("Starting project creation script execution for issue: ${issue.key}")
 
 // Create and configure the project - all operations happen within the same lock
-def projectScript = new ProjectCreationScript()
-def result = projectScript.createProjectFromIssue(issue)
+def projectScript = new ProjectCreationScript(true) // Enable test mode
 
-// The project creation method now handles both project creation and permission scheme assignment
-// within the same cluster lock to ensure atomicity
-if (!result.success) {
-    log.error("Project creation workflow failed: ${result.error}")
+Map<String, Object> result = projectScript.createProjectFromIssue(issue)
+
+if (!(result["success"] as boolean)) {
+    log.error("Project creation workflow failed: ${result["error"]}")
 } else {
     log.warn("Project creation workflow completed successfully")
-    if (result.permissionError) {
-        log.warn("Project created but with permission issues: ${result.permissionError}")
+    if (result["permissionError"]) {
+        log.warn("Project created but with permission issues: ${result["permissionError"]}")
     }
 }
