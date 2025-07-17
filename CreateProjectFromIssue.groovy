@@ -30,6 +30,7 @@ import com.atlassian.jira.project.UpdateProjectParameters
 import com.atlassian.jira.scheme.SchemeEntity
 import com.atlassian.jira.security.roles.ProjectRoleActor
 import com.atlassian.jira.security.roles.ProjectRoleManager
+import com.atlassian.jira.transaction.TransactionSupport
 import com.atlassian.jira.user.ApplicationUser
 import com.atlassian.jira.util.SimpleErrorCollection
 import com.google.common.collect.ImmutableList
@@ -50,8 +51,8 @@ class ProjectCreationScript {
     private static final Logger log = Logger.getLogger(ProjectCreationScript.class)
     private static final String CACHE_NAME = "project-creation-cache"
     private static final String LOCK_PREFIX = "project-creation-lock-"
-    private static final int LOCK_TIMEOUT_SECONDS = 30
-    private static final int MAX_RETRIES = 1  // Reduced further based on suggestions
+    private static final int LOCK_TIMEOUT_SECONDS = 120
+    private static final int MAX_RETRIES = 5  // Reduced further based on suggestions
     private static final long PERMISSION_REF_SCHEME_ID = 10207L
     private static final long NOTIFICATION_REF_SCHEME_ID = 12300L
 
@@ -102,6 +103,7 @@ class ProjectCreationScript {
     private CommentManager commentManager
     private PermissionSchemeManager permissionSchemeManager
     private ProjectRoleService projectRoleService
+    private TransactionSupport transactionSupport
 
     private boolean isTestMode = false // Set to true for Script Console testing
 
@@ -200,6 +202,7 @@ class ProjectCreationScript {
         this.commentManager = ComponentAccessor.getCommentManager()
         this.permissionSchemeManager = ComponentAccessor.getPermissionSchemeManager()
         this.projectRoleService = ComponentAccessor.getComponent(ProjectRoleService.class)
+        this.transactionSupport = ComponentAccessor.getComponent(TransactionSupport.class)
     }
 
     /**
@@ -551,8 +554,11 @@ class ProjectCreationScript {
             attempts++
 
             try {
-                // Create the project directly without a transaction template
-                return createProject(projectDetails)
+                // Wrap in transaction
+                def result = transactionSupport.executeInTransaction { ->
+                    return createProject(projectDetails)
+                }
+                return result
 
             } catch (Exception e) {
                 lastError = e
@@ -560,7 +566,7 @@ class ProjectCreationScript {
 
                 if (attempts < MAX_RETRIES) {
                     // Use exponential backoff with jitter instead of simple sleep
-                    def backoffTime = (long) (Math.pow(2, attempts) * 1000 + Math.random() * 1000)  // Add jitter
+                    def backoffTime = (long) (Math.pow(2, attempts) * 2000 + Math.random() * 1000)  // Add jitter
                     Thread.sleep(backoffTime)
                 }
             }
@@ -634,6 +640,18 @@ class ProjectCreationScript {
         if (!project) {
             log.error("Project creation returned null")
             return [success: false, error: "Creation failed: null project"] as Map<String, Object>
+        }
+
+        def maxPollAttempts = 10
+        def pollInterval = 1000  // 1 sec
+        def pollCount = 0
+        while (projectManager.getProjectObjByKey(projectDetails.projectKey as String) == null && pollCount < maxPollAttempts) {
+            Thread.sleep(pollInterval)
+            pollCount++
+            log.warn("Polling for project visibility: attempt ${pollCount}")
+        }
+        if (pollCount == maxPollAttempts) {
+            throw new RuntimeException("Project not visible after polling")
         }
 
         // Set project category after creation if specified
@@ -1011,9 +1029,6 @@ class ProjectCreationScript {
         }
     }
 
-    /**
-     * Improved parseUserList method - REVISED VERSION
-     */
     private List<String> parseUserList(String userList) {
         if (!userList?.trim()) {
             return []
@@ -1175,6 +1190,11 @@ class CopyPermissionsScheme {
                 // FIXED: Get GenericValue for new scheme
                 def newGV = permissionSchemeManager.getSchemeObject(newScheme.id)  // Returns GenericValue
                 permissionSchemeManager.createSchemeEntity(newGV as GenericValue, schemeEntity)  // Expects GenericValue
+            }
+
+            def fetchedNewScheme = permissionSchemeManager.getSchemeObject(newSchemeName)
+            if (!fetchedNewScheme) {
+                return [success: false, error: "New scheme not fetchable after creation"]
             }
 
             return [success: true, scheme: newScheme]
