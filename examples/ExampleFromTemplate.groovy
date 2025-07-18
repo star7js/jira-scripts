@@ -1,3 +1,4 @@
+import com.atlassian.jira.bc.projectroles.ProjectRoleService
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.project.Project
 import com.atlassian.jira.project.ProjectManager
@@ -6,6 +7,8 @@ import com.atlassian.jira.security.roles.ProjectRoleManager
 import com.atlassian.jira.user.ApplicationUser
 import com.atlassian.jira.cluster.ClusterManager
 import com.atlassian.jira.project.AssigneeTypes
+import com.atlassian.jira.util.ErrorCollection
+import com.atlassian.jira.util.SimpleErrorCollection
 import com.onresolve.scriptrunner.canned.jira.admin.CopyProject
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
@@ -32,6 +35,7 @@ def templateMap = [
 def customFieldManager = ComponentAccessor.getCustomFieldManager()
 def projectManager = ComponentAccessor.getProjectManager()
 def projectRoleManager = ComponentAccessor.getComponent(ProjectRoleManager.class)
+def projectRoleService = ComponentAccessor.getComponent(ProjectRoleService.class)
 def permissionSchemeManager = ComponentAccessor.getPermissionSchemeManager()
 def userManager = ComponentAccessor.getUserManager()
 def authenticationContext = ComponentAccessor.getJiraAuthenticationContext()
@@ -147,19 +151,24 @@ if (useOpenScheme) {
     if (scheme) permissionSchemeManager.assignPermissionScheme(newProject, scheme)
 }
 
-// Add users to roles
+// Add users to roles using non-deprecated ProjectRoleService
+def ErrorCollection errors = new SimpleErrorCollection()
+
 def ProjectRole adminRole = projectRoleManager.getProjectRole("Administrators")
 if (adminRole && adminUsers) {
-    projectRoleManager.addActorsToProjectRole(adminUsers.collect { it.key }, adminRole, newProject, actorTypeUser)
+    projectRoleService.addActorsToProjectRole(adminUsers.collect { it.key }, adminRole, newProject, actorTypeUser, errors)
+    if (errors.hasAnyErrors()) log.error("Error adding admins: ${errors}")
 }
 
 def ProjectRole serviceDeskRole = projectRoleManager.getProjectRole("Service Desk Team")
 if (serviceDeskRole && serviceDeskUsers) {
-    projectRoleManager.addActorsToProjectRole(serviceDeskUsers.collect { it.key }, serviceDeskRole, newProject, actorTypeUser)
+    projectRoleService.addActorsToProjectRole(serviceDeskUsers.collect { it.key }, serviceDeskRole, newProject, actorTypeUser, errors)
+    if (errors.hasAnyErrors()) log.error("Error adding service desk users: ${errors}")
 }
 
 if (adminRole && projectLead) {
-    projectRoleManager.addActorsToProjectRole([projectLead.key], adminRole, newProject, actorTypeUser)
+    projectRoleService.addActorsToProjectRole([projectLead.key], adminRole, newProject, actorTypeUser, errors)
+    if (errors.hasAnyErrors()) log.error("Error adding lead to admins: ${errors}")
 }
 
 return "Project created: ${projectKey} - ${projectName} on node ${nodeId}. Adjustments applied by listener."
