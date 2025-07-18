@@ -5,6 +5,7 @@ import com.atlassian.jira.security.roles.ProjectRole
 import com.atlassian.jira.security.roles.ProjectRoleManager
 import com.atlassian.jira.user.ApplicationUser
 import com.atlassian.jira.cluster.ClusterManager
+import com.atlassian.jira.project.AssigneeTypes
 import com.onresolve.scriptrunner.canned.jira.admin.CopyProject
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
@@ -13,7 +14,7 @@ def log = Logger.getLogger("com.onresolve.scriptrunner.runner.ScriptRunnerImpl")
 log.setLevel(Level.DEBUG)
 
 // Hardcoded configurations - replace with your values
-def String adminUsername = "automationuser" // Your automation/service account with admin rights
+def String adminUsername = "admin" // Your automation/service account with admin rights
 def long openPermissionSchemeId = 10001 // ID of your open permission scheme (if not handled by listener)
 def String actorTypeUser = "atlassian-user-role-actor" // For adding users to roles
 
@@ -50,15 +51,15 @@ if (!adminUser) {
 // Backup current user
 def ApplicationUser originalUser = authenticationContext.getLoggedInUser()
 
-// Custom fields
-def projectNameField = customFieldManager.getCustomFieldObjectByName("New Project Or Team")
-def projectTypeField = customFieldManager.getCustomFieldObjectByName("Project Type")
-def projectCategoryField = customFieldManager.getCustomFieldObjectByName("Project Category")
-def projectLeadField = customFieldManager.getCustomFieldObjectByName("Project Lead / Project Admin")
-def adminUsersField = customFieldManager.getCustomFieldObjectByName("List All Users That Should Have Administrator Rights On The Project")
-def serviceDeskUsersField = customFieldManager.getCustomFieldObjectByName("List All Users That Should Have Service Desk Team Rights On The Project")
-def viewAllField = customFieldManager.getCustomFieldObjectByName("Should All Employees Have The Ability To View This Project?")
-def createEditAllField = customFieldManager.getCustomFieldObjectByName("Should All Employees Have The Ability To Create/Edit Issues In This Project?")
+// Custom fields - use getCustomFieldObjectsByName and take first (handles deprecation)
+def projectNameField = customFieldManager.getCustomFieldObjectsByName("New Project Or Team")?.first()
+def projectTypeField = customFieldManager.getCustomFieldObjectsByName("Project Type")?.first()
+def projectCategoryField = customFieldManager.getCustomFieldObjectsByName("Project Category")?.first()
+def projectLeadField = customFieldManager.getCustomFieldObjectsByName("Project Lead / Project Admin")?.first()
+def adminUsersField = customFieldManager.getCustomFieldObjectsByName("List All Users That Should Have Administrator Rights On The Project")?.first()
+def serviceDeskUsersField = customFieldManager.getCustomFieldObjectsByName("List All Users That Should Have Service Desk Team Rights On The Project")?.first()
+def viewAllField = customFieldManager.getCustomFieldObjectsByName("Should All Employees Have The Ability To View This Project?")?.first()
+def createEditAllField = customFieldManager.getCustomFieldObjectsByName("Should All Employees Have The Ability To Create/Edit Issues In This Project?")?.first()
 
 // Extract values
 def String projectName = issue.getCustomFieldValue(projectNameField) as String
