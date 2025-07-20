@@ -1,11 +1,16 @@
+package com.newgrok
+
 import com.atlassian.jira.bc.project.ProjectCreationData
 import com.atlassian.jira.bc.project.ProjectService
+import com.atlassian.jira.bc.projectroles.ProjectRoleService
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.project.AssigneeTypes
 import com.atlassian.jira.project.type.ProjectTypeKey
 import com.atlassian.jira.security.roles.ProjectRoleManager
+import com.atlassian.jira.security.roles.ProjectRoleActor
 import com.atlassian.jira.user.ApplicationUser
 import com.atlassian.jira.cluster.ClusterManager
+import com.atlassian.jira.util.SimpleErrorCollection
 import com.onresolve.scriptrunner.runner.customisers.JiraAgileBean
 import com.onresolve.scriptrunner.runner.customisers.WithPlugin
 import com.atlassian.greenhopper.web.rapid.view.RapidViewHelper
@@ -22,6 +27,7 @@ log.setLevel(Level.WARN)
 def cfManager = ComponentAccessor.customFieldManager
 def projectManager = ComponentAccessor.projectManager
 def projectService = ComponentAccessor.getComponent(ProjectService)
+def projectRoleService = ComponentAccessor.getComponent(ProjectRoleService)
 def projectRoleManager = ComponentAccessor.getComponent(ProjectRoleManager)
 def userManager = ComponentAccessor.userManager
 def clusterManager = ComponentAccessor.getComponent(ClusterManager)
@@ -112,11 +118,25 @@ while (projectManager.getProjectObjByName(uniqueName)) {
 }
 log.warn("Generated unique name: ${uniqueName}")
 
-// Generate unique key (as closure to capture outer scope, with fixed logging)
+// Generate unique key from baseName (not uniqueName) to avoid invalid chars from suffixes
 def generateKey = { String name ->
-    def words = name.split("\\s+")
-    def baseKey = words.collect { it[0]?.toUpperCase() ?: "" }.join("")
-    if (baseKey.length() < 2) baseKey = name.replaceAll("[^A-Z]", "").toUpperCase()[0..Math.min(4, name.length() - 1)]
+    // Clean name: keep only letters/spaces, uppercase
+    def cleanedName = name.replaceAll("[^A-Za-z ]", "").trim().toUpperCase()
+    if (!cleanedName) {
+        log.error("No valid letters in project name for key generation")
+        throw new Exception("Invalid project name for key")
+    }
+    def words = cleanedName.split("\\s+")
+    def baseKey = words.collect { it[0] }.join("")  // No ?.: assumes letters now
+    // Fallback if too short: take first 2-5 letters
+    if (baseKey.length() < 2) {
+        baseKey = cleanedName.replaceAll(" ", "")[0..Math.min(4, cleanedName.length() - 1)]
+    }
+    // Ensure starts with letter (though cleaning should handle)
+    if (!baseKey.matches("^[A-Z].*")) {
+        log.error("Generated base key ${baseKey} doesn't start with a letter")
+        throw new Exception("Invalid base key")
+    }
     def key = baseKey
     int suffix = 1
     while (projectManager.getProjectByCurrentKey(key)) {
@@ -126,18 +146,18 @@ def generateKey = { String name ->
     }
     return key
 }
-def projectKey = generateKey(uniqueName) // Use uniqueName for key generation to keep them aligned
+def projectKey = generateKey(baseName)
 log.warn("Generated key: ${projectKey}")
 
 // Create project data
 def creationData = new ProjectCreationData.Builder()
-    .withName(uniqueName)
-    .withKey(projectKey)
-    .withDescription("Created from ${issue.key}")
-    .withLead(lead)
-    .withAssigneeType(AssigneeTypes.PROJECT_LEAD)
-    .withType(projectTypeKey)
-    .build()
+        .withName(uniqueName)
+        .withKey(projectKey)
+        .withDescription("Created from ${issue.key}")
+        .withLead(lead)
+        .withAssigneeType(AssigneeTypes.PROJECT_LEAD)
+        .withType(projectTypeKey)
+        .build()
 
 def validationResult = projectService.validateCreateProject(loggedInUser, creationData)
 if (!validationResult.valid) {
@@ -145,11 +165,7 @@ if (!validationResult.valid) {
     throw new Exception("Project validation failed")
 }
 
-def createResult = projectService.createProject(validationResult)
-if (!createResult.valid) {
-    log.error("Creation failed: ${createResult.errorCollection}")
-    throw new Exception("Project creation failed")
-}
+projectService.createProject(validationResult)
 log.warn("Project created with key ${projectKey}")
 
 // Retry fetch due to potential cache delay in multi-node
@@ -189,29 +205,39 @@ if (!adminsRole) {
 }
 
 // Add lead and additional admins
-def adminActors = [lead.username] as Set<String>
-adminActors.addAll(adminUsers.collect { it.username })
+def adminActors = [lead.key] as Set<String>
+adminActors.addAll(adminUsers.collect { it.key })
 
 // Add JIP bot if yes (replace username if not exact)
 if (jipYes) {
     def jipBot = userManager.getUserByName("jip-user-bot") // Placeholder—confirm exact name
     if (jipBot) {
-        adminActors.add(jipBot.username)
+        adminActors.add(jipBot.key)
         log.warn("Adding JIP bot: ${jipBot.username}")
     } else {
         log.warn("JIP bot user not found—skipping")
     }
 }
 
-projectRoleManager.addActorsToProjectRole(adminActors, adminsRole, project)
+def errorCollection = new SimpleErrorCollection()
+projectRoleService.addActorsToProjectRole(adminActors, adminsRole, project, ProjectRoleActor.USER_ROLE_ACTOR_TYPE, errorCollection)
+if (errorCollection.hasAnyErrors()) {
+    log.error("Errors adding admins: ${errorCollection.errors}")
+    throw new Exception("Admin role addition failed")
+}
 log.warn("Added admins: ${adminActors}")
 
 // Add service desk users if any
 if (sdUsers) {
     def sdRole = projectRoleManager.getProjectRole("Service Desk Team")
     if (sdRole) {
-        def sdActors = sdUsers.collect { it.username } as Set<String>
-        projectRoleManager.addActorsToProjectRole(sdActors, sdRole, project)
+        def sdActors = sdUsers.collect { it.key } as Set<String>
+        def sdErrorCollection = new SimpleErrorCollection()
+        projectRoleService.addActorsToProjectRole(sdActors, sdRole, project, ProjectRoleActor.USER_ROLE_ACTOR_TYPE, sdErrorCollection)
+        if (sdErrorCollection.hasAnyErrors()) {
+            log.error("Errors adding service desk users: ${sdErrorCollection.errors}")
+            throw new Exception("Service desk role addition failed")
+        }
         log.warn("Added service desk users: ${sdActors}")
     } else {
         log.warn("Service Desk Team role not found—skipping")
