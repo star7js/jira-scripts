@@ -1,5 +1,3 @@
-package com.newgrok
-
 import com.atlassian.jira.bc.project.ProjectCreationData
 import com.atlassian.jira.bc.project.ProjectService
 import com.atlassian.jira.bc.projectroles.ProjectRoleService
