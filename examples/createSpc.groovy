@@ -67,7 +67,7 @@ def createSpaceParams = [
     ]
 ]
 
-def createResponseBody
+def createResponseBody = null
 try {
     authenticatedRequestFactory
         .createRequest(Request.MethodType.POST, "rest/api/space/_private")
@@ -87,54 +87,71 @@ try {
     return
 }
 
-// Space created successfully - now add permissions
+if (!createResponseBody) {
+    log.error("Space creation failed without exception")
+    return
+}
 
-// Helper function to add permission
-def addPermission(String subjectType, String identifier, String operationKey) {
-    def permParams = [
-        subject: [
-            type: subjectType,
-            identifier: identifier
-        ],
-        operation: [
-            key: operationKey,
-            target: "space"
-        ]
+// Space created successfully - now add permissions using JSON-RPC (since REST permission endpoint is not available in Server/DC)
+
+// Helper function to call JSON-RPC
+def callRpc(String method, List params) {
+    def rpcBody = [
+        jsonrpc: "2.0",
+        method: method,
+        params: params,
+        id: System.currentTimeMillis()
     ]
 
+    def rpcResponseBody = null
     try {
         authenticatedRequestFactory
-            .createRequest(Request.MethodType.POST, "rest/api/space/${spaceKey}/permission")
+            .createRequest(Request.MethodType.POST, "rpc/json-rpc/confluenceservice-v2")
             .addHeader("Content-Type", "application/json")
-            .setRequestBody(new JsonBuilder(permParams).toString())
+            .setRequestBody(new JsonBuilder(rpcBody).toString())
             .execute(new ResponseHandler<Response>() {
                 @Override
                 void handle(Response response) throws ResponseException {
-                    if (response.statusCode != HttpURLConnection.HTTP_OK) {
-                        log.warn("Failed to add permission for ${identifier}: ${response.getResponseBodyAsString()}")
+                    if (!response.isSuccessful()) {
+                        throw new Exception("RPC call failed: ${response.statusCode} - ${response.getResponseBodyAsString()}")
                     }
+                    rpcResponseBody = new JsonSlurper().parseText(response.getResponseBodyAsString())
                 }
             })
+
+        if (rpcResponseBody.error) {
+            log.warn("RPC error: ${rpcResponseBody.error.message}")
+            return false
+        }
+        return rpcResponseBody.result as boolean
     } catch (Exception e) {
-        log.error("Error adding permission: ${e.message}")
+        log.error("Error in RPC call to ${method}: ${e.message}")
+        return false
     }
 }
 
-// Add administer permissions for team members
+// Helper function to add permission
+def addPermission(String permission, String entityName, String spaceKey) {
+    // permission e.g. "ADMINISTER" or "VIEWSPACE"
+    // entityName: group name or username
+    return callRpc("addPermissionToSpace", [permission, entityName, spaceKey])
+}
+
+// Add administer permissions for team members (users)
 teamAdmins.each { adminUser ->
-    addPermission("user", adminUser.getUsername(), "administer")
+    addPermission("ADMINISTER", adminUser.getUsername(), spaceKey)
 }
 
 // Add view permission for requester (if not already in admins)
 if (requester && !teamAdmins.contains(requester)) {
-    addPermission("user", requester.getUsername(), "read")
+    addPermission("VIEWSPACE", requester.getUsername(), spaceKey)
 }
 
 // If all employees should view, add view permission for the default group (adjust group name if different, e.g., "confluence-users")
 if (allEmployeesView) {
-    addPermission("group", "confluence-users", "read")
+    addPermission("VIEWSPACE", "confluence-users", spaceKey)
 }
 
 // Optionally, link the space back to the Jira issue or log the space URL
-def spaceUrl = createResponseBody?._links?.webui
+def spaceUrl = createResponseBody._links?.webui ?: "/spaces/${spaceKey}"
 log.info("Confluence space created: ${spaceName} (${spaceKey}) at ${confluenceLink.getDestinationApplicationUrl()}${spaceUrl}")
