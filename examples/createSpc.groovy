@@ -1,5 +1,3 @@
-package com.newgrok
-
 import com.atlassian.applinks.api.ApplicationLink
 import com.atlassian.applinks.api.ApplicationLinkRequestFactory
 import com.atlassian.applinks.api.ApplicationLinkService
@@ -40,6 +38,9 @@ def spaceKey = issue.getCustomFieldValue(spaceKeyCf) as String
 def fullDesc = "Created from Jira issue ${issue.key}".trim()
 def teamAdmins = issue.getCustomFieldValue(teamAdminsCf) as List<ApplicationUser> ?: [] // List of ApplicationUser
 def requester = issue.getReporter() // ApplicationUser
+
+// Get the current user running the script
+def currentUser = ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser() ?: requester // Fallback to requester if no current user
 
 // Exit if required fields are missing
 if (!spaceName || !spaceKey) {
@@ -169,4 +170,4 @@ log.info("Confluence space created: ${spaceName} (${spaceKey}) at ${fullSpaceUrl
 // Add a comment to the Jira issue with the link to the new space
 def commentManager = ComponentAccessor.getCommentManager()
 def commentBody = "New Confluence space created: [${spaceName} (${spaceKey})|${fullSpaceUrl}]"
-commentManager.create(issue, requester, commentBody, false) // Using requester as the comment author; adjust if needed
+commentManager.create(issue, currentUser, commentBody, false) // Using current user as the comment author
