@@ -1,3 +1,5 @@
+package com.newgrok
+
 import com.atlassian.applinks.api.ApplicationLink
 import com.atlassian.applinks.api.ApplicationLinkRequestFactory
 import com.atlassian.applinks.api.ApplicationLinkService
@@ -136,7 +138,7 @@ def callRpc(String method, List params) {
 
 // Helper function to add permission
 def addPermission(String permission, String entityName, String spaceKey) {
-    // permission e.g. "ADMINISTER" or "VIEWSPACE"
+    // permission e.g. "VIEWSPACE" or "SETSPACEPERMISSIONS"
     // entityName: group name or username
     def success = callRpc("addPermissionToSpace", [permission, entityName, spaceKey])
     log.info("Add ${permission} for ${entityName} to ${spaceKey} succeeded: ${success}") // Added for debugging
@@ -146,13 +148,13 @@ def addPermission(String permission, String entityName, String spaceKey) {
 // Add administer permissions for team members (users)
 teamAdmins.each { ApplicationUser adminUser ->
     addPermission("VIEWSPACE", adminUser.getUsername(), spaceKey)
-    addPermission("ADMINISTER", adminUser.getUsername(), spaceKey)
+    addPermission("SETSPACEPERMISSIONS", adminUser.getUsername(), spaceKey)
 }
 
 // Make requester an admin (always, in addition to team admins)
 if (requester) {
     addPermission("VIEWSPACE", requester.getUsername(), spaceKey)
-    addPermission("ADMINISTER", requester.getUsername(), spaceKey)
+    addPermission("SETSPACEPERMISSIONS", requester.getUsername(), spaceKey)
 }
 
 // Get the space URL
